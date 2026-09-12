@@ -9,6 +9,7 @@
 #include "Task/Fight/SideStoryReopenTask.h"
 #include "Task/Fight/StageDropsTaskPlugin.h"
 #include "Task/Fight/StageNavigationTask.h"
+#include "Task/Miscellaneous/ScreenshotTaskPlugin.h"
 #include "Task/ProcessTask.h"
 #include "Utils/Logger.hpp"
 #include <ranges>
@@ -34,6 +35,7 @@ asst::FightTask::FightTask(const AsstCallback& callback, Assistant* inst) :
         .set_times_limit("PRTS3", 0)
         .set_times_limit("EndOfAction", 0)
         .set_retry_times(5);
+    m_start_up_task_ptr->register_plugin<ScreenshotTaskPlugin>();
 
     m_stage_navigation_task_ptr->set_fight_task_ptr(m_fight_task_ptr);
     m_stage_navigation_task_ptr->set_enable(false).set_retry_times(0);
@@ -66,13 +68,13 @@ bool asst::FightTask::set_params(const json::value& params)
 
     const std::string stage = params.get("stage", "");
     const int medicine = params.get("medicine", 0);
-    int medicine_expire_days = 2;
+    int medicine_expire_days = 0;
     if (auto expiring_day_opt = params.find<int>("medicine_expire_days"); !expiring_day_opt) {
         if (auto opt = params.find<int>("expiring_medicine"); opt) {
             medicine_expire_days = opt.value() == 0 ? 0 : 2;
             LogWarn << "================  DEPRECATED  ================";
             LogWarn << __FUNCTION__
-                    << " 'expiring_medicine' is deprecated, please use 'medicine_expiring_day' instead.";
+                    << " 'expiring_medicine' is deprecated since v6.8.0, please use 'medicine_expire_days' instead.";
             LogWarn << "================  DEPRECATED  ================";
         }
     }
@@ -80,7 +82,7 @@ bool asst::FightTask::set_params(const json::value& params)
         medicine_expire_days = expiring_day_opt.value();
     }
     if (medicine_expire_days < 0) {
-        LogError << __FUNCTION__ << "Invalid medicine_expiring_day";
+        LogError << __FUNCTION__ << "Invalid medicine_expire_days," << medicine_expire_days;
         return false;
     }
 
@@ -89,7 +91,9 @@ bool asst::FightTask::set_params(const json::value& params)
     const int series = params.get("series", 1);
 
     m_fight_times_prt->set_fight_times(times);
-    if (series < -1 || series > 6) {
+
+    bool is_new_series_list = Task.get("FightSeries-OldMethodFlag") == nullptr;
+    if (series < -1 || (series > 10 && is_new_series_list) || (series > 6 && !is_new_series_list)) {
         Log.error("Invalid series");
         return false;
     }
@@ -127,8 +131,12 @@ bool asst::FightTask::set_params(const json::value& params)
             m_start_up_task_ptr->set_tasks({ "StageBegin" }).set_times_limit("GoLastBattle", 0);
             if (stage.starts_with("SSReopen-") && stage.length() == 11) {
                 m_sidestory_reopen_task_ptr->set_sidestory_name(stage.substr(9));
+                if (!m_stage_navigation_task_ptr->set_stage_name(stage.substr(9) + "-OpenOpt")) {
+                    Log.error("StageNavigationTask not support sidestory reopen stage", stage);
+                    return false;
+                }
                 m_sidestory_reopen_task_ptr->set_enable(true);
-                m_stage_navigation_task_ptr->set_enable(false);
+                m_stage_navigation_task_ptr->set_enable(true);
             }
             else if (m_stage_navigation_task_ptr->set_stage_name(stage)) {
                 m_sidestory_reopen_task_ptr->set_enable(false);
@@ -141,9 +149,22 @@ bool asst::FightTask::set_params(const json::value& params)
                 return false;
             }
         }
-        m_start_up_task_ptr->set_enable(!m_sidestory_reopen_task_ptr->get_enable());
         m_fight_task_ptr->set_enable(!m_sidestory_reopen_task_ptr->get_enable());
         m_stage_drops_plugin_ptr->set_server(server);
+    }
+
+    // times=0 视为跳过本任务（如库存保持判定无需进图）：禁用全部子任务。
+    // 任务排队中则瞬间以成功结束；已开始则在当前子任务的节点边界优雅中断。
+    if (times == 0) {
+        m_start_up_task_ptr->set_enable(false);
+        m_stage_navigation_task_ptr->set_enable(false);
+        m_fight_task_ptr->set_enable(false);
+        m_sidestory_reopen_task_ptr->set_enable(false);
+    }
+    else if (!m_running) {
+        // times>0 重新下发时，恢复可能被 times=0 禁用的启动子任务，保证状态可逆；
+        // 其余子任务的 enable 由上方 !m_running 块按最新参数重算
+        m_start_up_task_ptr->set_enable(true);
     }
 
     m_stage_drops_plugin_ptr->set_target_stage(stage);

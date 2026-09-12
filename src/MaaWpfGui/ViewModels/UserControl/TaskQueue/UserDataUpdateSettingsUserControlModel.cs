@@ -17,13 +17,18 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Threading.Tasks;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Configuration.Single.MaaTask;
 using MaaWpfGui.Constants;
 using MaaWpfGui.Constants.Enums;
 using MaaWpfGui.Extensions;
 using MaaWpfGui.Helper;
+using MaaWpfGui.Services;
 using MaaWpfGui.Utilities.ValueType;
+using MaaWpfGui.ViewModels.UI;
 using Stylet;
+using static MaaWpfGui.Main.AsstProxy;
 
 namespace MaaWpfGui.ViewModels.UserControl.TaskQueue;
 
@@ -32,6 +37,7 @@ public class UserDataUpdateSettingsUserControlModel : TaskSettingsViewModel, Use
     static UserDataUpdateSettingsUserControlModel()
     {
         Instance = new();
+        LocalizationHelper.LanguageChanged += Instance.RefreshLocalization;
     }
 
     public static UserDataUpdateSettingsUserControlModel Instance { get; }
@@ -54,12 +60,10 @@ public class UserDataUpdateSettingsUserControlModel : TaskSettingsViewModel, Use
         set => SetTaskConfig<UserDataUpdateTask>(t => t.TriggerInterval == value, t => t.TriggerInterval = value);
     }
 
-    public List<GenericCombinedData<UserDataUpdateTriggerInterval>> TriggerIntervalList { get; } =
-    [
-        new() { Display = LocalizationHelper.GetString("EveryTime"), Value = UserDataUpdateTriggerInterval.EveryTime },
-        new() { Display = LocalizationHelper.GetString("Daily"), Value = UserDataUpdateTriggerInterval.Daily },
-        new() { Display = LocalizationHelper.GetString("Weekly"), Value = UserDataUpdateTriggerInterval.Weekly },
-    ];
+    public LocalizedObservableList<UserDataUpdateTriggerInterval> TriggerIntervalList { get; } = new(
+        (UserDataUpdateTriggerInterval.EveryTime, "EveryTime"),
+        (UserDataUpdateTriggerInterval.Daily, "Daily"),
+        (UserDataUpdateTriggerInterval.Weekly, "Weekly"));
 
     public override void RefreshUI(BaseTask baseTask)
     {
@@ -100,39 +104,55 @@ public class UserDataUpdateSettingsUserControlModel : TaskSettingsViewModel, Use
             }
 
             List<int> ids = [];
-            bool ret = false;
+            bool operBoxSyncedWithoutTask = false;
             if (operBoxTriggerDue)
             {
-                ret = Instances.ToolboxViewModel.StartOperBoxRecognitionTask(startImmediately: false);
-                if (!ret)
+                if (SettingsViewModel.ThirdPartyServiceSettings.EnableOperBoxYituliuApi)
                 {
-                    return (false, []);
-                }
+                    if (string.IsNullOrWhiteSpace(SettingsViewModel.ThirdPartyServiceSettings.YituliuOpenApiToken))
+                    {
+                        // 错误才打任务分区标题提供上下文，正常执行不需要
+                        Instances.TaskQueueViewModel.AddLogSection(baseTask.NameOrTaskType);
+                        Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("YituliuTokenEmpty"), UiLogColor.Error);
+                        return (false, []);
+                    }
 
-                int operBoxTaskId = Instances.AsstProxy.TasksStatus.Last().Key;
-                Instances.ToolboxViewModel.MarkOperBoxRecognitionDataForReset(operBoxTaskId);
-                ids.Add(operBoxTaskId);
+                    // 一图流 OpenAPI 模式：不进 core 队列，后台直接拉取，没有 core 任务 id，完成后自行更新条目状态
+                    _ = SyncOperBoxFromYituliuApiAsync(baseTask);
+                    operBoxSyncedWithoutTask = true;
+                }
+                else
+                {
+                    bool operBoxRet = Instances.ToolboxViewModel.StartOperBoxRecognitionTask(startImmediately: false);
+                    if (!operBoxRet)
+                    {
+                        return (false, []);
+                    }
+
+                    int operBoxTaskId = Instances.AsstProxy.TasksStatus.Last().Key;
+                    Instances.ToolboxViewModel.MarkOperBoxRecognitionDataForReset(operBoxTaskId);
+                    ids.Add(operBoxTaskId);
+                }
             }
 
             if (depotTriggerDue)
             {
-                ret = Instances.ToolboxViewModel.StartDepotRecognitionTask(false);
-                if (!ret)
+                var (result, depotTaskId) = Instances.AsstProxy.AsstAppendTaskWithEncoding(TaskType.Depot, (AsstTaskType.Depot, null));
+                if (!result)
                 {
+                    Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("DepotPlanUpdateDepotFailed"), UiLogColor.Error);
                     return (false, []);
                 }
-
-                int depotTaskId = Instances.AsstProxy.TasksStatus.Last().Key;
                 Instances.ToolboxViewModel.MarkDepotRecognitionSyncTimeForReset(depotTaskId);
                 ids.Add(depotTaskId);
             }
 
-            if (ret && operBoxTriggerDue && depotTriggerDue)
+            if (operBoxTriggerDue && depotTriggerDue)
             {
                 AchievementTrackerHelper.Instance.Unlock(AchievementIds.DoubleSync);
             }
 
-            return ret ? (true, ids) : (null, []);
+            return ids.Count > 0 || operBoxSyncedWithoutTask ? (true, ids) : (null, []);
         }
 
         private static bool IsTriggerDue(DateTimeOffset? lastSyncTime, UserDataUpdateTriggerInterval triggerInterval)
@@ -156,5 +176,34 @@ public class UserDataUpdateSettingsUserControlModel : TaskSettingsViewModel, Use
                 _ => true,
             };
         }
+    }
+
+    /// <summary>
+    /// 从一图流拉取干员数据并在完成后写任务日志、更新任务条目状态。
+    /// 拉取是后台并行的，只在结束时输出一条日志，避免与队列启动日志交错。
+    /// </summary>
+    /// <param name="baseTask">发起拉取的任务，用于定位任务条目</param>
+    /// <returns>Task</returns>
+    private static async Task SyncOperBoxFromYituliuApiAsync(BaseTask baseTask)
+    {
+        var success = await Instances.ToolboxViewModel.StartOperBoxFromYituliuApiAsync();
+        if (success)
+        {
+            Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("YituliuOperBoxCompleted"), UiLogColor.Info, splitMode: TaskQueueViewModel.LogCardSplitMode.Both);
+        }
+
+        var index = ConfigFactory.CurrentConfig.TaskQueue.IndexOf(baseTask);
+        if (index >= 0)
+        {
+            Instances.TaskQueueViewModel.TaskItemViewModels.ElementAtOrDefault(index)?.StatusDisplay = success ? TaskItemStatus.Completed : TaskItemStatus.Error;
+        }
+    }
+
+    /// <summary>
+    /// 刷新构造时缓存的本地化列表文本。
+    /// </summary>
+    private void RefreshLocalization()
+    {
+        TriggerIntervalList.RefreshLocalization();
     }
 }

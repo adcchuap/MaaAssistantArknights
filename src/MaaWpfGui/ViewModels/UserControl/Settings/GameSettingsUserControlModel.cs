@@ -13,14 +13,15 @@
 
 #nullable enable
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Constants;
+using MaaWpfGui.Constants.Enums;
+using MaaWpfGui.Extensions;
 using MaaWpfGui.Helper;
 using MaaWpfGui.States;
-using MaaWpfGui.Utilities;
 using MaaWpfGui.Utilities.ValueType;
 using MaaWpfGui.ViewModels.UI;
 using MaaWpfGui.ViewModels.UserControl.TaskQueue;
@@ -36,6 +37,7 @@ public class GameSettingsUserControlModel : PropertyChangedBase
     static GameSettingsUserControlModel()
     {
         Instance = new();
+        LocalizationHelper.LanguageChanged += Instance.RefreshLocalization;
     }
 
     public static GameSettingsUserControlModel Instance { get; }
@@ -46,133 +48,106 @@ public class GameSettingsUserControlModel : PropertyChangedBase
 
     public bool StartGame
     {
-        get => SettingsViewModel.ConnectSettings.UseAttachWindow ? false : field;
+        get => SettingsViewModel.ConnectSettings.IsPCConnectConfig ? false : field;
         set {
             SetAndNotify(ref field, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.StartGame, value.ToString());
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StartGame = value;
         }
-    } = ConfigurationHelper.GetValue(ConfigurationKeys.StartGame, true);
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StartGame;
 
     /// <summary>
     /// Gets the list of the client types.
     /// </summary>
-    public List<CombinedData> ClientTypeList { get; } =
-        [
-            new() { Display = LocalizationHelper.GetString("Official"), Value = Constants.Enums.ClientType.Official },
-            new() { Display = LocalizationHelper.GetString("Bilibili"), Value = Constants.Enums.ClientType.Bilibili },
-            new() { Display = LocalizationHelper.GetString("YoStarEN"), Value = Constants.Enums.ClientType.EN },
-            new() { Display = LocalizationHelper.GetString("YoStarJP"), Value = Constants.Enums.ClientType.JP },
-            new() { Display = LocalizationHelper.GetString("YoStarKR"), Value = Constants.Enums.ClientType.KR },
-            new() { Display = LocalizationHelper.GetString("Txwy"), Value = Constants.Enums.ClientType.Txwy },
-        ];
-
-    private string _clientType = ConfigurationHelper.GetValue(ConfigurationKeys.ClientType, Constants.Enums.ClientType.Official);
+    public LocalizedObservableList<ClientType> ClientTypeList { get; } = new(
+        (ClientType.Official, "Official"),
+        (ClientType.Bilibili, "Bilibili"),
+        (ClientType.EN, "YoStarEN"),
+        (ClientType.JP, "YoStarJP"),
+        (ClientType.KR, "YoStarKR"),
+        (ClientType.Txwy, "Txwy"));
 
     /// <summary>
     /// Gets or sets the client type.
     /// </summary>
-    public string ClientType
+    public ClientType ClientType
     {
-        get { // v5.19.0-beta.1
-            if (!string.IsNullOrEmpty(_clientType))
-            {
-                return _clientType;
-            }
-
-            ConfigurationHelper.SetValue(ConfigurationKeys.ClientType, Constants.Enums.ClientType.Official);
-            return Constants.Enums.ClientType.Official;
-        }
-
-        set {
-            var oldValue = _clientType;
-            if (!SetAndNotify(ref _clientType, value))
+        get; set {
+            var oldValue = field;
+            if (!SetAndNotify(ref field, value))
             {
                 return;
             }
 
-            ConfigurationHelper.SetValue(ConfigurationKeys.ClientType, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.ClientType = value;
             VersionUpdateSettings.ResourceInfoUpdate();
             FightSettingsUserControlModel.Instance.UpdateStageList();
+            DepotMaintainTaskUserControlModel.Instance.UpdateStageList();
             Instances.TaskQueueViewModel.UpdateDatePrompt();
 
             if (!NeedRestartAfterClientTypeChange(oldValue, value))
             {
+                Instances.AsstProxy.Connected = false;
                 return;
             }
 
             Task.Run(() => { Instances.AsstProxy.LoadResource(); });
 
-            SettingsViewModel.AskRestartToApplySettings(value is Constants.Enums.ClientType.EN);
+            SettingsViewModel.AskRestartToApplySettings(value is ClientType.EN);
         }
-    }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.ClientType;
 
-    private static bool NeedRestartAfterClientTypeChange(string oldType, string newType)
+    private static bool NeedRestartAfterClientTypeChange(ClientType oldType, ClientType newType)
     {
-        if (string.IsNullOrEmpty(oldType) || oldType == newType)
+        if (oldType == newType)
         {
             return false;
         }
 
         // 官服 <-> B服 之间切换不需要重启
-        return (oldType != "Official" || newType != "Bilibili") &&
-               (oldType != "Bilibili" || newType != "Official");
+        return (oldType != ClientType.Official || newType != ClientType.Bilibili) &&
+               (oldType != ClientType.Bilibili || newType != ClientType.Official);
     }
-
-    private bool _deploymentWithPause = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.RoguelikeDeploymentWithPause, bool.FalseString));
 
     public bool DeploymentWithPause
     {
-        get => _deploymentWithPause;
-        set {
-            SetAndNotify(ref _deploymentWithPause, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.RoguelikeDeploymentWithPause, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.DeployWithPause = value;
             SettingsViewModel.ConnectSettings.UpdateInstanceSettings();
         }
-    }
-
-    private string _startsWithScript = ConfigurationHelper.GetValue(ConfigurationKeys.StartsWithScript, string.Empty);
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.DeployWithPause;
 
     public string StartsWithScript
     {
-        get => _startsWithScript;
-        set {
-            SetAndNotify(ref _startsWithScript, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.StartsWithScript, value);
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.PreRunScript = value;
         }
-    }
-
-    private string _endsWithScript = ConfigurationHelper.GetValue(ConfigurationKeys.EndsWithScript, string.Empty);
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.PreRunScript;
 
     public string EndsWithScript
     {
-        get => _endsWithScript;
-        set {
-            SetAndNotify(ref _endsWithScript, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.EndsWithScript, value);
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.PostRunScript = value;
         }
-    }
-
-    private bool _copilotWithScript = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.CopilotWithScript, bool.FalseString));
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.PostRunScript;
 
     public bool CopilotWithScript
     {
-        get => _copilotWithScript;
-        set {
-            SetAndNotify(ref _copilotWithScript, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.CopilotWithScript, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.ExecuteScriptOnCopilot = value;
         }
-    }
-
-    private bool _manualStopWithScript = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.ManualStopWithScript, bool.FalseString));
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.ExecuteScriptOnCopilot;
 
     public bool ManualStopWithScript
     {
-        get => _manualStopWithScript;
-        set {
-            SetAndNotify(ref _manualStopWithScript, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ManualStopWithScript, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.ExecuteScriptOnManualStop = value;
         }
-    }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.ExecuteScriptOnManualStop;
 
     public void RunScript(string str, bool showLog = true)
     {
@@ -274,101 +249,103 @@ public class GameSettingsUserControlModel : PropertyChangedBase
         }
     }
 
-    private bool _blockSleep = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.BlockSleep, bool.FalseString));
-
     public bool BlockSleep
     {
-        get => _blockSleep;
-        set {
-            SetAndNotify(ref _blockSleep, value);
-            SleepManagement.SetBlockSleep(value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.BlockSleep, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.BlockSleep = value;
         }
-    }
-
-    private bool _blockSleepWithScreenOn = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.BlockSleepWithScreenOn, bool.TrueString));
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.BlockSleep;
 
     public bool BlockSleepWithScreenOn
     {
-        get => _blockSleepWithScreenOn;
-        set {
-            SetAndNotify(ref _blockSleepWithScreenOn, value);
-            SleepManagement.SetBlockSleepWithScreenOn(value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.BlockSleepWithScreenOn, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.BlockSleepWithScreenOn = value;
         }
-    }
-
-    #region 企鹅和一图流上报
-
-    private string _penguinId = ConfigurationHelper.GetValue(ConfigurationKeys.PenguinId, string.Empty);
-
-    /// <summary>
-    /// Gets or sets the id of PenguinStats.
-    /// </summary>
-    public string PenguinId
-    {
-        get => _penguinId;
-        set {
-            SetAndNotify(ref _penguinId, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.PenguinId, value);
-        }
-    }
-
-    private bool _enablePenguin = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.EnablePenguin, bool.TrueString));
-
-    /// <summary>
-    /// Gets or sets a value indicating whether to enable penguin upload.
-    /// </summary>
-    public bool EnablePenguin
-    {
-        get => _enablePenguin;
-        set {
-            SetAndNotify(ref _enablePenguin, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.EnablePenguin, value.ToString());
-        }
-    }
-
-    private bool _enableYituliu = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.EnableYituliu, bool.TrueString));
-
-    /// <summary>
-    /// Gets or sets a value indicating whether to enable yituliu upload.
-    /// </summary>
-    public bool EnableYituliu
-    {
-        get => _enableYituliu;
-        set {
-            SetAndNotify(ref _enableYituliu, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.EnableYituliu, value.ToString());
-        }
-    }
-
-    #endregion 企鹅和一图流上报
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.BlockSleepWithScreenOn;
 
     #region 任务超时
 
-    private int _taskTimeoutMinutes = ConfigurationHelper.GetValue(ConfigurationKeys.TaskTimeoutMinutes, 60);
-
-    public int TaskTimeoutMinutes
+    /// <summary>
+    /// Gets or sets a value indicating whether是否启用停滞检测
+    /// </summary>
+    public bool EnableStallTimeout
     {
-        get => _taskTimeoutMinutes;
-        set {
-            SetAndNotify(ref _taskTimeoutMinutes, value);
-            _runningState.TaskTimeoutMinutes = value;
-            ConfigurationHelper.SetValue(ConfigurationKeys.TaskTimeoutMinutes, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            _runningState.EnableStallTimeout = value;
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.EnableStallTimeout = value;
         }
-    }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.EnableStallTimeout;
 
-    private int _reminderIntervalMinutes = ConfigurationHelper.GetValue(ConfigurationKeys.ReminderIntervalMinutes, 30);
+    public int StallTimeoutMinutes
+    {
+        get; set {
+            value = value.Clamp(0, TimeoutMaxMinutes);
+            SetAndNotify(ref field, value);
+            _runningState.StallTimeoutMinutes = value;
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StallTimeoutMinutes = value;
+        }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StallTimeoutMinutes;
+
+    // 防止乘以 60000 毫秒时 int 溢出，int.MaxValue / 60000 ≈ 35791
+    public const int TimeoutMaxMinutes = 11451;
 
     public int ReminderIntervalMinutes
     {
-        get => _reminderIntervalMinutes;
-        set {
-            SetAndNotify(ref _reminderIntervalMinutes, value);
+        get; set {
+            value = value.Clamp(1, TimeoutMaxMinutes);
+            SetAndNotify(ref field, value);
             _runningState.ReminderIntervalMinutes = value;
-            ConfigurationHelper.SetValue(ConfigurationKeys.ReminderIntervalMinutes, value.ToString());
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StallTimeoutReminderIntervalMinutes = value;
         }
-    }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StallTimeoutReminderIntervalMinutes;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether 是否启用运行时长上限，null 为右键半选，仅生效一次
+    /// </summary>
+    public bool? EnableRunDurationLimit
+    {
+        get; set {
+            SetAndNotify(ref field, value);
+            NotifyOfPropertyChange(nameof(RunDurationLimitActive));
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.EnableRunDurationLimit = value;
+        }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.EnableRunDurationLimit;
+
+    /// <summary>
+    /// Gets a value indicating whether 运行时长上限生效（勾选或右键半选）
+    /// </summary>
+    public bool RunDurationLimitActive => EnableRunDurationLimit != false;
+
+    public int RunDurationLimitMinutes
+    {
+        get; set {
+            value = value.Clamp(1, TimeoutMaxMinutes);
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.RunDurationLimitMinutes = value;
+        }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.RunDurationLimitMinutes;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether 到达运行时长上限停止后是否执行完成后动作
+    /// </summary>
+    public bool RunDurationLimitExecutePostActions
+    {
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Gui.RuntimeSettings.RunDurationLimitExecutePostActions = value;
+        }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.RunDurationLimitExecutePostActions;
 
     #endregion 任务超时
+
+    /// <summary>
+    /// 刷新构造时缓存的本地化列表文本。
+    /// </summary>
+    private void RefreshLocalization()
+    {
+        ClientTypeList.RefreshLocalization();
+    }
 }

@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using MaaWpfGui.Helper;
 
 namespace MaaWpfGui.Styles.Controls;
@@ -24,14 +25,6 @@ public class TextBlock : System.Windows.Controls.TextBlock
     static TextBlock()
     {
         DefaultStyleKeyProperty.OverrideMetadata(typeof(TextBlock), new FrameworkPropertyMetadata(typeof(TextBlock)));
-    }
-
-    public static readonly DependencyProperty CustomForegroundProperty = DependencyProperty.Register(nameof(CustomForeground), typeof(Brush), typeof(TextBlock), new PropertyMetadata(ThemeHelper.DefaultBrush));
-
-    public Brush CustomForeground
-    {
-        get { return (Brush)GetValue(CustomForegroundProperty); }
-        set { SetValue(CustomForegroundProperty, value); }
     }
 
     public static readonly DependencyProperty ForegroundKeyProperty = DependencyProperty.Register(nameof(ForegroundKey), typeof(string), typeof(TextBlock), new PropertyMetadata(ThemeHelper.DefaultKey, OnForegroundKeyChanged));
@@ -47,13 +40,11 @@ public class TextBlock : System.Windows.Controls.TextBlock
 
     public string ForegroundKey
     {
-        get
-        {
+        get {
             return (string)GetValue(ForegroundKeyProperty);
         }
 
-        set
-        {
+        set {
             SetValue(ForegroundKeyProperty, value);
 
             // `Application.Current.Resources.Contains(key)` 不会递归检查 MergedDictionaries，
@@ -61,6 +52,7 @@ public class TextBlock : System.Windows.Controls.TextBlock
             if (TryFindResource(value) is Brush)
             {
                 SetResourceReference(ForegroundProperty, value);
+                TryStartRainbowAnimation();
                 return;
             }
 
@@ -73,6 +65,22 @@ public class TextBlock : System.Windows.Controls.TextBlock
 
             SetValue(ForegroundProperty, brush);
         }
+    }
+
+    private void TryStartRainbowAnimation()
+    {
+        if (Foreground is not LinearGradientBrush { Transform: TranslateTransform translate })
+        {
+            return;
+        }
+
+        var anim = new DoubleAnimation {
+            From = 0,
+            To = 2000,
+            Duration = new Duration(System.TimeSpan.FromSeconds(60)),
+            EasingFunction = new PowerEase { Power = 3, EasingMode = EasingMode.EaseOut },
+        };
+        translate.BeginAnimation(TranslateTransform.XProperty, anim);
     }
 
     public static readonly DependencyProperty BindableInlinesProperty =

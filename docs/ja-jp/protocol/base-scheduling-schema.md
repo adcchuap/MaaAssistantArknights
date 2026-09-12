@@ -13,7 +13,9 @@ icon: material-symbols:view-quilt-rounded
 JSONファイルはコメントをサポートしていません。テキスト内のコメントはプレゼンテーション用にのみ使用されます。直接コピーして使用しないでください。
 :::
 
-[ビジュアルスケジューリング生成ツール](https://ark.yituliu.cn/tools/schedule)
+[ビジュアルスケジューリング生成ツール](https://ark.yituliu.cn/tools/scheduleV3)
+
+[基地スケジュール自動生成ツール](https://riic.autos/)
 
 ## 完全なフィールドの一覧
 
@@ -147,6 +149,6 @@ JSONファイルはコメントをサポートしていません。テキスト�
 
 ## サンプル
 
-[243 有効率が最も高い 一日三回](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/243_layout_3_times_a_day.json)
+[243 有効率が最も高い 一日三回](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/243_layout_3_times_a_day.json)
 
-[153 有効率が最も高い 一日三回](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/153_layout_3_times_a_day.json)
+[153 有効率が最も高い 一日三回](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/153_layout_3_times_a_day.json)

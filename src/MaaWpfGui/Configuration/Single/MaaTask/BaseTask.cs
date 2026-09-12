@@ -11,11 +11,9 @@
 // but WITHOUT ANY WARRANTY
 // </copyright>
 #nullable enable
-using System.ComponentModel;
 using System.Text.Json.Serialization;
-using JetBrains.Annotations;
-using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Helper;
+using MaaWpfGui.Models;
 using static MaaWpfGui.Main.AsstProxy;
 
 namespace MaaWpfGui.Configuration.Single.MaaTask;
@@ -36,15 +34,15 @@ namespace MaaWpfGui.Configuration.Single.MaaTask;
 [JsonDerivedType(typeof(OperBoxTask), typeDiscriminator: nameof(OperBoxTask))]
 [JsonDerivedType(typeof(UserDataUpdateTask), typeDiscriminator: nameof(UserDataUpdateTask))]
 [JsonDerivedType(typeof(ReclamationTask), typeDiscriminator: nameof(ReclamationTask))]
+[JsonDerivedType(typeof(DepotMaintainTask), typeDiscriminator: nameof(DepotMaintainTask))]
+[JsonDerivedType(typeof(SwitchThemeTask), typeDiscriminator: nameof(SwitchThemeTask))]
 [JsonDerivedType(typeof(CustomTask), typeDiscriminator: nameof(CustomTask))]
-public class BaseTask : INotifyPropertyChanged
+public class BaseTask : NotifyPropertyChangedWithValue
 {
-    public event PropertyChangedEventHandler? PropertyChanged;
-
     public string Name { get; set; } = string.Empty;
 
     [JsonIgnore]
-    public string NameDisplay => string.IsNullOrEmpty(Name) ? LocalizationHelper.GetString(TaskType.ToString()) : Name;
+    public string NameOrTaskType => string.IsNullOrEmpty(Name) ? LocalizationHelper.GetString(TaskType.ToString()) : Name;
 
     public bool? IsEnable { get; set; } = true;
 
@@ -52,12 +50,6 @@ public class BaseTask : INotifyPropertyChanged
     /// Gets 任务类型，用于添加任务时使用
     /// </summary>
     public TaskType TaskType { get; init; }
-
-    [UsedImplicitly]
-    public void OnPropertyChanged(string propertyName, object before, object after)
-    {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventDetailArgs(propertyName, before, after));
-    }
 }
 
 #pragma warning disable SA1402 // File may only contain a single type

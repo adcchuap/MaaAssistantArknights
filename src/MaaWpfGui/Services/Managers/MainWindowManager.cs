@@ -13,6 +13,7 @@
 
 using System;
 using System.Windows;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Constants;
 using MaaWpfGui.Helper;
 using MaaWpfGui.Views.UI;
@@ -44,10 +45,10 @@ public sealed class MainWindowManager : IMainWindowManager
     {
         MainWindow.StateChanged += MainWindowStateChanged;
 
-        bool minimizeToTray = Convert.ToBoolean(ConfigurationHelper.GetGlobalValue(ConfigurationKeys.MinimizeToTray, bool.FalseString));
+        bool minimizeToTray = ConfigFactory.Root.Gui.MinimizeToTray;
         SetMinimizeToTray(minimizeToTray);
 
-        bool useTrayIcon = Convert.ToBoolean(ConfigurationHelper.GetGlobalValue(ConfigurationKeys.UseTray, bool.TrueString));
+        bool useTrayIcon = ConfigFactory.Root.Gui.UseTray;
         SetUseTrayIcon(useTrayIcon);
 
         _previousState = GetWindowState();

@@ -39,7 +39,10 @@ public:
     virtual bool key_down(int key) = 0;
     virtual bool key_up(int key) = 0;
 
-    virtual bool scroll(int dx, int dy) = 0;
+    virtual bool inactive() = 0;
+
+    // json::object get_info() const - ABI slot occupied, not called from MAA side
+    virtual void* get_info() const = 0;
 };
 
 class MaaFwAdbControlUnitAPI : public MaaFwControlUnitAPI
@@ -51,7 +54,13 @@ public:
     virtual bool shell(
         const std::string& cmd,
         std::string& output,
-        std::chrono::milliseconds timeout = std::chrono::milliseconds(20000)) = 0;
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(20'000)) = 0;
+};
+
+class MaaFwAndroidNativeControlUnitAPI : public MaaFwControlUnitAPI
+{
+public:
+    ~MaaFwAndroidNativeControlUnitAPI() override = default;
 };
 
 // 与 MaaFramework 的 MaaControllerFeature 兼容的常量

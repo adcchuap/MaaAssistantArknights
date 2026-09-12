@@ -14,25 +14,28 @@
 #nullable enable
 using System;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Constants;
+using MaaWpfGui.Constants.Enums;
+using MaaWpfGui.Extensions;
 using MaaWpfGui.Helper;
 using MaaWpfGui.Utilities;
-using MaaWpfGui.ViewModels.UI;
 using Serilog;
 
 namespace MaaWpfGui.States;
 
 public class RunningState
 {
-    public class RunningStateChangedEventArgs(bool idle, bool inited, bool stopping) : EventArgs
+    public class RunningStateChangedEventArgs(StateSnapshot oldState, bool idle, bool inited, bool stopping, RunOwner owner) : EventArgs
     {
-        public bool Idle { get; } = idle;
+        public StateSnapshot OldState { get; } = oldState;
 
-        public bool Inited { get; } = inited;
-
-        public bool Stopping { get; } = stopping;
+        public StateSnapshot NewState { get; } = new(idle, inited, stopping, owner);
     }
+
+    public record StateSnapshot(bool Idle, bool Inited, bool Stopping, RunOwner Owner);
 
     private static RunningState? _instance;
     private static readonly ILogger _logger = Log.Logger.ForContext<RunningState>();
@@ -44,8 +47,9 @@ public class RunningState
             ReminderIntervalMinutes = 1;
         }
 
-        _timeoutReminderTimer.Interval = ReminderIntervalMinutes * 60 * 1000;
+        _timeoutReminderTimer.Interval = LongTaskTimeoutMinutes * 60 * 1000;
         _timeoutReminderTimer.Elapsed += TimeoutReminderTimer_Elapsed;
+        _stallTimer.Elapsed += StallTimer_Elapsed;
     }
 
     public static RunningState Instance
@@ -58,80 +62,265 @@ public class RunningState
 
     // 超时相关字段
     private readonly System.Timers.Timer _timeoutReminderTimer = new();
+    private readonly System.Timers.Timer _stallTimer = new();
+
+    // System.Timers.Timer 实例成员非线程安全，并发 Start/Stop/改 Interval 会抛 NRE；
+    // 所有触碰两个计时器及其伴生状态（_taskStartTime/_stallAccumulatedCount/_stallIsFirstFire）
+    // 的入口共用此锁。StallOccurred 事件与成就解锁等外部回调一律放锁外，防订阅者链路重入持锁
+    private readonly Lock _timerLock = new();
+    private int _stallAccumulatedCount = 0;
+    private bool _stallIsFirstFire = true;
     private DateTime? _taskStartTime;
 
-    public int TaskTimeoutMinutes { get; set; } = SettingsViewModel.GameSettings.TaskTimeoutMinutes;
-
-    private int _reminderIntervalMinutes = SettingsViewModel.GameSettings.ReminderIntervalMinutes;
+    // 防止乘以 60000 毫秒时 int 溢出，int.MaxValue / 60000 ≈ 35791
+    private const int MaxMinutes = 11451;
+    private const int LongTaskTimeoutMinutes = 60;
 
     public int ReminderIntervalMinutes
     {
-        get => _reminderIntervalMinutes;
-        set {
-            if (value < 1)
-            {
-                return;
-            }
-
-            _reminderIntervalMinutes = value;
+        get; set {
+            value = value.Clamp(1, MaxMinutes);
+            field = value;
             TimeoutReminderTimer_Elapsed(null, null);
-            _timeoutReminderTimer.Interval = value * 60 * 1000;
+            lock (_timerLock)
+            {
+                _timeoutReminderTimer.Interval = value * 60 * 1000;
+            }
+        }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StallTimeoutReminderIntervalMinutes;
+
+    public int StallTimeoutMinutes
+    {
+        get; set {
+            value = value.Clamp(0, MaxMinutes);
+            field = value;
+            lock (_timerLock)
+            {
+                _stallIsFirstFire = true;
+                if (_stallTimer.Enabled)
+                {
+                    _stallTimer.Stop();
+                    if (value > 0)
+                    {
+                        _stallTimer.Interval = value * 60 * 1000;
+                        _stallTimer.Start();
+                    }
+                }
+            }
+        }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.StallTimeoutMinutes;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether 启用停滞检测
+    /// </summary>
+    public bool EnableStallTimeout
+    {
+        get; set {
+            field = value;
+            if (!value)
+            {
+                lock (_timerLock)
+                {
+                    if (_stallTimer.Enabled)
+                    {
+                        _stallTimer.Stop();
+                    }
+                }
+            }
+        }
+    } = ConfigFactory.CurrentConfig.Gui.RuntimeSettings.EnableStallTimeout;
+
+    public event EventHandler<string>? StallOccurred;
+
+    public void NotifyOutputActivity()
+    {
+        lock (_timerLock)
+        {
+            _stallAccumulatedCount = 0;
+            _stallIsFirstFire = true;
+            if (_stallTimer.Enabled && EnableStallTimeout && StallTimeoutMinutes > 0)
+            {
+                _stallTimer.Interval = StallTimeoutMinutes * 60 * 1000;
+                _stallTimer.Stop();
+                _stallTimer.Start();
+            }
         }
     }
 
     // 超时事件
-    public event EventHandler<string>? TimeoutOccurred;
-
     public void StartTimeoutTimer()
     {
-        _taskStartTime = DateTime.Now;
-        _timeoutReminderTimer.Start();
+        lock (_timerLock)
+        {
+            _taskStartTime = DateTime.Now;
+            _timeoutReminderTimer.Start();
+            _stallAccumulatedCount = 0;
+            _stallIsFirstFire = true;
+            if (EnableStallTimeout && StallTimeoutMinutes > 0)
+            {
+                _stallTimer.Interval = StallTimeoutMinutes * 60 * 1000;
+                _stallTimer.Start();
+            }
+        }
     }
 
     public void StopTimeoutTimer()
     {
-        _timeoutReminderTimer.Stop();
-        _taskStartTime = null;
+        lock (_timerLock)
+        {
+            _timeoutReminderTimer.Stop();
+            _stallTimer.Stop();
+            _stallAccumulatedCount = 0;
+            _stallIsFirstFire = true;
+            _taskStartTime = null;
+        }
     }
 
     public void ResetTimeout()
     {
-        _taskStartTime = DateTime.Now;
+        lock (_timerLock)
+        {
+            _taskStartTime = DateTime.Now;
+        }
+    }
+
+    // 运行时长上限相关字段，仅由主任务队列开始时设置，空闲时清除
+    private readonly Lock _runDeadlineLock = new();
+    private DateTime? _runDeadline;
+    private int _runDurationLimitMinutes;
+    private bool _runDurationLimitExecutePostActions;
+
+    public void SetRunDeadline(int limitMinutes, bool executePostActions)
+    {
+        lock (_runDeadlineLock)
+        {
+            _runDurationLimitMinutes = limitMinutes;
+            _runDurationLimitExecutePostActions = executePostActions;
+            _runDeadline = DateTime.UtcNow.AddMinutes(limitMinutes);
+        }
+    }
+
+    public void ClearRunDeadline()
+    {
+        lock (_runDeadlineLock)
+        {
+            _runDeadline = null;
+        }
+    }
+
+    /// <summary>
+    /// 若已到达运行截止时间，则清除截止时间并返回 true，保证每轮运行只触发一次。
+    /// </summary>
+    /// <param name="limitMinutes">设置的运行时长上限（分钟）。</param>
+    /// <param name="executePostActions">停止后是否执行完成后动作。</param>
+    /// <returns>是否已到达截止时间。</returns>
+    public bool TryConsumeRunDeadline(out int limitMinutes, out bool executePostActions)
+    {
+        lock (_runDeadlineLock)
+        {
+            limitMinutes = _runDurationLimitMinutes;
+            executePostActions = _runDurationLimitExecutePostActions;
+            if (_runDeadline is not { } deadline || DateTime.UtcNow < deadline)
+            {
+                return false;
+            }
+
+            _runDeadline = null;
+            return true;
+        }
     }
 
     // 超时计时器回调
     private void TimeoutReminderTimer_Elapsed(object? sender, System.Timers.ElapsedEventArgs? e)
     {
-        if (!_taskStartTime.HasValue || _idle)
+        bool unlockProxyOnline;
+        lock (_timerLock)
         {
-            return;
+            if (_taskStartTime is not { } start || _idle)
+            {
+                return;
+            }
+
+            unlockProxyOnline = (DateTime.Now - start).TotalMinutes > 3 * 60;
         }
 
-        var elapsedMinutes = (DateTime.Now - _taskStartTime.Value).TotalMinutes;
-
-        if (elapsedMinutes > 3 * 60)
+        if (unlockProxyOnline)
         {
             AchievementTrackerHelper.Instance.Unlock(AchievementIds.ProxyOnline3Hours);
         }
+    }
 
-        // 如果任务运行时间未超过超时时间，则直接返回
-        if (elapsedMinutes <= TaskTimeoutMinutes)
+    private void StallTimer_Elapsed(object? sender, System.Timers.ElapsedEventArgs e)
+    {
+        int accumulatedMinutes;
+        lock (_timerLock)
         {
-            return;
+            _stallTimer.Stop();
+            _stallAccumulatedCount++;
+            accumulatedMinutes = StallTimeoutMinutes + ((_stallAccumulatedCount - 1) * ReminderIntervalMinutes);
+            if (EnableStallTimeout && StallTimeoutMinutes > 0)
+            {
+                if (_stallIsFirstFire)
+                {
+                    _stallTimer.Interval = ReminderIntervalMinutes * 60 * 1000;
+                    _stallIsFirstFire = false;
+                }
+
+                _stallTimer.Start();
+            }
         }
 
-        // 每隔 ReminderIntervalMinutes 提示一次
-        var message = string.Format(
-            LocalizationHelper.GetString("TaskTimeoutWarning"),
-            TaskTimeoutMinutes,
-            Math.Round(elapsedMinutes));
-
+        // 事件与成就在锁外触发：订阅者回调链可能重入本类的计时方法
+        var message = LocalizationHelper.GetStringFormat(
+            "TaskStallWarning",
+            StallTimeoutMinutes,
+            accumulatedMinutes);
+        StallOccurred?.Invoke(this, message);
         AchievementTrackerHelper.Instance.Unlock(AchievementIds.LongTaskTimeout);
-
-        TimeoutOccurred?.Invoke(this, message);
     }
 
     private bool _idle = true;
+    private RunOwner _runOwner;
+
+    /// <summary>
+    /// 当前运行轮次的发起入口归属，由开始入口经 <see cref="BeginRun"/> 声明，回到空闲时清零。
+    /// </summary>
+    public RunOwner Owner
+    {
+        get => _runOwner;
+        private set {
+            if (_runOwner == value)
+            {
+                return;
+            }
+
+            var oldState = new StateSnapshot(_idle, _inited, _stopping, _runOwner);
+            _runOwner = value;
+            RaiseStateChanged(oldState);
+        }
+    }
+
+    /// <summary>
+    /// 声明本轮运行的入口归属并进入运行态；已在运行时调用则归属由新入口接管。
+    /// </summary>
+    /// <param name="owner">发起运行的入口归属。</param>
+    /// <param name="caller">调用方名称。</param>
+    public void BeginRun(RunOwner owner, [CallerMemberName] string caller = "")
+    {
+        _logger.Information("BeginRun: owner={Owner} (called from {Caller})", owner, caller);
+        if (_idle)
+        {
+            // 空闲起点直接写字段，归属与离开空闲合并为一次广播；避免先经 Owner setter 单独
+            // 广播出 ｢空闲但已有归属｣ 的中间快照
+            _runOwner = owner;
+        }
+        else
+        {
+            Owner = owner;
+        }
+
+        SetIdle(false);
+    }
 
     public bool Idle
     {
@@ -142,11 +331,17 @@ public class RunningState
                 return;
             }
 
+            var oldState = new StateSnapshot(_idle, _inited, _stopping, _runOwner);
             _idle = value;
-
             if (value)
             {
+                // 回到空闲即本轮结束：归属与停止中在同一快照内清零。直接 SetIdle(true) 收尾
+                // 的链路（工具箱各工具连接失败、测试连接等）不经 SetStopped，若不清 Stopping
+                // 会留下 ｢空闲但停止中｣ 的死锁态——三页开始/停止按钮全部不可用
+                _runOwner = RunOwner.None;
+                _stopping = false;
                 StopTimeoutTimer();
+                ClearRunDeadline();
                 SleepManagement.AllowSleep();
             }
             else
@@ -155,16 +350,86 @@ public class RunningState
                 SleepManagement.BlockSleep();
             }
 
-            RaiseStateChanged();
+            RaiseStateChanged(oldState);
         }
     }
 
+    /// <summary>
+    /// 是否空闲（仅反映任务运行状态）。
+    /// 仅供 UI 绑定和按钮状态使用。需要判断"是否可以安全执行打断性操作"（如自动更新重启）时，
+    /// 应使用 <see cref="CanInterrupt"/>，它会额外排除中断锁定（结束后脚本、倒计时等）的情况。
+    /// </summary>
+    /// <returns>当前是否空闲。</returns>
     public bool GetIdle() => Idle;
 
     public void SetIdle(bool idle, [CallerMemberName] string caller = "")
     {
         _logger.Information("Idle: {Old} to {New} (called from {Caller})", Idle, idle, caller);
         Idle = idle;
+    }
+
+    // 引用计数：CheckAfterCompleted 外层和 TimerCanceledAsync 内层各自 Lock/Unlock，
+    // 只有当计数归零时才真正解除锁定，避免嵌套 try-finally 提前解锁的竞态。
+    private int _interruptLockDepth;
+
+    /// <summary>
+    /// 锁定中断（引用计数 +1）。
+    /// 锁定期间（关机/休眠倒计时、结束后脚本、退出游戏、杀模拟器等），
+    /// <see cref="CanInterrupt"/> 返回 false，<see cref="UntilIdleAsync"/> 会持续等待。
+    /// </summary>
+    /// <param name="caller">调用方名称。</param>
+    public void LockInterrupt([CallerMemberName] string caller = "")
+    {
+        var newValue = Interlocked.Increment(ref _interruptLockDepth);
+        _logger.Information("InterruptLock: depth={Depth} (called from {Caller})", newValue, caller);
+    }
+
+    /// <summary>
+    /// 解除锁定（引用计数 -1，不小于 0）。
+    /// </summary>
+    /// <param name="caller">调用方名称。</param>
+    public void UnlockInterrupt([CallerMemberName] string caller = "")
+    {
+        var newValue = Interlocked.Decrement(ref _interruptLockDepth);
+        if (newValue < 0)
+        {
+            _logger.Warning("InterruptLock unlock: depth underflow, clamping to 0 (called from {Caller})", caller);
+
+            // 仅当值仍为该负数时才归零，避免与并发 LockInterrupt 竞态抹掉合法的锁
+            Interlocked.CompareExchange(ref _interruptLockDepth, 0, newValue);
+        }
+        else
+        {
+            _logger.Information("InterruptLock: depth={Depth} (called from {Caller})", newValue, caller);
+        }
+
+        SignalCanInterrupt();
+    }
+
+    /// <summary>
+    /// 当前中断是否被锁定。
+    /// </summary>
+    /// <returns>是否被锁定。</returns>
+    public bool IsInterruptLocked() => Volatile.Read(ref _interruptLockDepth) > 0;
+
+    /// <summary>
+    /// 当前是否可以安全打断（空闲且中断未锁定）。
+    /// 中断锁定期间（关机/休眠倒计时、结束后脚本、退出游戏、杀模拟器等）不属于可安全打断的状态。
+    /// </summary>
+    /// <returns>空闲且中断未锁定返回 <see langword="true"/>，否则返回 <see langword="false"/>。</returns>
+    public bool CanInterrupt() => GetIdle() && !IsInterruptLocked();
+
+    // 等待可打断的广播信号；状态跃迁或中断锁归零且恰好可打断时置位换新，等待方被即时唤醒
+    private TaskCompletionSource _canInterruptSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private void SignalCanInterrupt()
+    {
+        if (!CanInterrupt())
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _canInterruptSignal, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
     }
 
     private bool _inited;
@@ -175,8 +440,9 @@ public class RunningState
         set {
             if (_inited != value)
             {
+                var oldState = new StateSnapshot(_idle, _inited, _stopping, _runOwner);
                 _inited = value;
-                RaiseStateChanged();
+                RaiseStateChanged(oldState);
             }
         }
     }
@@ -197,8 +463,9 @@ public class RunningState
         set {
             if (_stopping != value)
             {
+                var oldState = new StateSnapshot(_idle, _inited, _stopping, _runOwner);
                 _stopping = value;
-                RaiseStateChanged();
+                RaiseStateChanged(oldState);
             }
         }
     }
@@ -213,33 +480,65 @@ public class RunningState
 
     public event EventHandler<RunningStateChangedEventArgs>? StateChanged;
 
-    private void RaiseStateChanged()
+    private void RaiseStateChanged(StateSnapshot oldState)
     {
-        StateChanged?.Invoke(this, new(_idle, _inited, _stopping));
+        StateChanged?.Invoke(this, new(oldState, _idle, _inited, _stopping, _runOwner));
+        SignalCanInterrupt();
     }
 
     /// <summary>
-    /// 等待状态变为闲置
+    /// 等待状态变为闲置（可打断），状态广播即时唤醒，无轮询。
     /// </summary>
-    /// <param name="time">查询间隔(ms)</param>
     /// <param name="confirmInterval">确认间隔(ms)</param>
-    /// <param name="confirmTimes">确认次数</param>
-    /// <returns>Task</returns>
-    public async Task UntilIdleAsync(int time = 1000, int confirmInterval = 1000, int confirmTimes = 3)
+    /// <param name="confirmTimes">确认次数；0 表示等到可打断即返回，不防抖确认</param>
+    /// <param name="timeout">总等待上限(ms)；小于 0（如 <see cref="Timeout.Infinite"/>）表示无限等待</param>
+    /// <returns>是否在超时内等到闲置；false 表示超时放弃</returns>
+    public async Task<bool> UntilIdleAsync(int confirmInterval = 1000, int confirmTimes = 3, int timeout = Timeout.Infinite)
     {
+        var deadline = timeout < 0 ? DateTime.MaxValue : DateTime.UtcNow.AddMilliseconds(timeout);
         while (true)
         {
-            while (!GetIdle())
+            while (!CanInterrupt())
             {
-                await Task.Delay(time);
+                // 无限等待须传 InfiniteTimeSpan：deadline 为 DateTime.MaxValue 时的差值远超
+                // Task.WaitAsync(TimeSpan) 的上限，直接传剩余时间会抛 ArgumentOutOfRangeException
+                var remaining = timeout < 0 ? Timeout.InfiniteTimeSpan : deadline - DateTime.UtcNow;
+                if (timeout >= 0 && remaining <= TimeSpan.Zero)
+                {
+                    _logger.Information("Idle not reached before timeout.");
+                    return false;
+                }
+
+                // 读取信号与挂起之间广播可能已置位，挂起前双查兜底
+                var signal = Volatile.Read(ref _canInterruptSignal);
+                if (CanInterrupt())
+                {
+                    break;
+                }
+
+                try
+                {
+                    await signal.Task.WaitAsync(remaining);
+                }
+                catch (TimeoutException)
+                {
+                    _logger.Information("Idle not reached before timeout.");
+                    return false;
+                }
             }
 
             int confirmed = 0;
             while (confirmed < confirmTimes)
             {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    _logger.Information("Idle not confirmed before timeout.");
+                    return false;
+                }
+
                 await Task.Delay(confirmInterval);
 
-                if (GetIdle())
+                if (CanInterrupt())
                 {
                     confirmed++;
                 }
@@ -253,7 +552,7 @@ public class RunningState
             if (confirmed >= confirmTimes)
             {
                 _logger.Information("Idle state confirmed after {ConfirmTimes} checks.", confirmTimes);
-                return;
+                return true;
             }
         }
     }

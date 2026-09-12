@@ -3,6 +3,7 @@
 #include "Utils/Platform.hpp"
 
 #include <boost/regex.hpp>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -24,8 +25,15 @@
 #include "MaatouchController.h"
 #include "MinitouchController.h"
 #include "PlayToolsController.h"
+#if ASST_WITH_EMULATOR_EXTRAS
+#include "MumuController.h"
+#endif
 #ifdef _WIN32
 #include "Win32Controller.h"
+#endif
+
+#ifdef __ANDROID__
+#include "MaaFwAndroidNativeController.h"
 #endif
 
 #include "Common/AsstTypes.h"
@@ -58,6 +66,15 @@ std::shared_ptr<asst::ControllerAPI>
             return std::make_shared<PlayToolsController>(m_callback, m_inst, platform_type);
         case ControllerType::MaaFwAdb:
             return std::make_shared<MaaFwAdbController>(m_callback, m_inst, platform_type);
+#if ASST_WITH_EMULATOR_EXTRAS
+        case ControllerType::Mumu:
+            return std::make_shared<MumuController>(m_callback, m_inst, platform_type);
+#endif
+#ifdef __ANDROID__
+        case ControllerType::MaaFwAndroidNative:
+            Log.debug("Use Android");
+            return std::make_shared<MaaFwAndroidNativeController>(m_callback, m_inst);
+#endif
         default:
             return nullptr;
         }
@@ -171,38 +188,52 @@ bool asst::Controller::input(const std::string& text)
     return m_controller->input(text);
 }
 
+bool asst::Controller::resolve_swipe_with_pause(bool with_pause) const noexcept
+{
+    return with_pause && m_swipe_with_pause;
+}
+
 bool asst::Controller::swipe(
     const Point& p1,
     const Point& p2,
     int duration,
-    bool extra_swipe,
+    SwipeExtraDirection extra_swipe,
     double slope_in,
     double slope_out,
     bool with_pause)
 {
     CHECK_EXIST(m_controller, false);
-    return m_scale_proxy->swipe(p1, p2, duration, extra_swipe, slope_in, slope_out, with_pause);
+    return m_scale_proxy
+        ->swipe(p1, p2, duration, extra_swipe, slope_in, slope_out, resolve_swipe_with_pause(with_pause));
 }
 
 bool asst::Controller::swipe(
     const Rect& r1,
     const Rect& r2,
     int duration,
-    bool extra_swipe,
+    SwipeExtraDirection extra_swipe,
     double slope_in,
     double slope_out,
     bool with_pause,
     bool high_resolution_swipe_fix)
 {
     CHECK_EXIST(m_controller, false);
-    return m_scale_proxy
-        ->swipe(r1, r2, duration, extra_swipe, slope_in, slope_out, with_pause, high_resolution_swipe_fix);
+    return m_scale_proxy->swipe(
+        r1,
+        r2,
+        duration,
+        extra_swipe,
+        slope_in,
+        slope_out,
+        resolve_swipe_with_pause(with_pause),
+        high_resolution_swipe_fix);
 }
 
 bool asst::Controller::inject_input_event(InputEvent& event)
 {
-    CHECK_EXIST(m_controller, false);
-    return m_controller->inject_input_event(event);
+    // 与 click/swipe 一致必须经 scale proxy，否则任务层的基准坐标未乘分辨率倍率直发设备
+    CHECK_EXIST(m_scale_proxy, false);
+    return m_scale_proxy->inject_input_event(event);
 }
 
 bool asst::Controller::press_esc()
@@ -215,8 +246,17 @@ bool asst::Controller::press_esc()
 
 asst::ControlFeat::Feat asst::Controller::support_features()
 {
+    static_assert(std::is_integral_v<ControlFeat::Feat>, "ControlFeat::Feat must be an integral bitmask type");
+    static_assert(
+        (ControlFeat::SWIPE_WITH_PAUSE & (ControlFeat::SWIPE_WITH_PAUSE - 1)) == 0,
+        "ControlFeat::SWIPE_WITH_PAUSE must be a single bit flag");
+
     CHECK_EXIST(m_controller, ControlFeat::NONE);
-    return m_controller->support_features();
+    auto feat = m_controller->support_features();
+    if (!m_swipe_with_pause) {
+        feat &= ~ControlFeat::SWIPE_WITH_PAUSE;
+    }
+    return feat;
 }
 
 bool asst::Controller::connect(const std::string& adb_path, const std::string& address, const std::string& config)
@@ -224,6 +264,9 @@ bool asst::Controller::connect(const std::string& adb_path, const std::string& a
     LogTraceFunction;
 
     clear_info();
+
+    // attach_window 会将 m_controller_type 置为 Win32，连接前按 touch mode 重新派生
+    set_touch_mode(m_touch_mode);
 
     m_controller = create_controller(m_controller_type, m_platform_type);
     if (!m_controller) {
@@ -247,11 +290,14 @@ bool asst::Controller::connect(const std::string& adb_path, const std::string& a
     }
 #endif
 
+    // Android uses lazy loading; no need to check in advance
+#ifndef __ANDROID__
     // try to find the fastest way
     if (!screencap()) {
         Log.error("Cannot find a proper way to screencap!");
         return false;
     }
+#endif
 
     auto proxy_callback = [&](const json::object& details) {
         json::value connection_info = json::object {
@@ -342,6 +388,13 @@ bool asst::Controller::attach_window(
 
     return true;
 }
+
+void asst::Controller::restore_window_position()
+{
+    if (auto* win32_controller = dynamic_cast<Win32Controller*>(m_controller.get()); win32_controller != nullptr) {
+        win32_controller->restore_window_position();
+    }
+}
 #endif
 
 bool asst::Controller::inited() noexcept
@@ -352,6 +405,8 @@ bool asst::Controller::inited() noexcept
 
 void asst::Controller::set_touch_mode(const TouchMode& mode) noexcept
 {
+    m_touch_mode = mode;
+
     switch (mode) {
     case TouchMode::Adb:
         m_controller_type = ControllerType::Adb;
@@ -368,6 +423,16 @@ void asst::Controller::set_touch_mode(const TouchMode& mode) noexcept
     case TouchMode::MaaFwAdb:
         m_controller_type = ControllerType::MaaFwAdb;
         break;
+#if ASST_WITH_EMULATOR_EXTRAS
+    case TouchMode::MumuExtras:
+        m_controller_type = ControllerType::Mumu;
+        break;
+#endif
+#ifdef __ANDROID__
+    case TouchMode::Android:
+        m_controller_type = ControllerType::MaaFwAndroidNative;
+        break;
+#endif
     default:
         m_controller_type = ControllerType::Minitouch;
     }

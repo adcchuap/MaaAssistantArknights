@@ -24,6 +24,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -495,6 +496,13 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
 
         _logger.Information("===================================");
 
+        // 尽早解析 skip 参数：pending 更新早退重启需要原样转发
+        _skipStartupAutoRun = args.Any(arg => string.Equals(arg, SkipStartupAutoRunArg, StringComparison.OrdinalIgnoreCase));
+        if (_skipStartupAutoRun)
+        {
+            _logger.Information("Startup auto-run will be skipped due to {Arg}", SkipStartupAutoRunArg);
+        }
+
         ConfigurationHelper.Load();
         LocalizationHelper.Load();
         if (PendingUpdateApplier.TryConsumeDelegatedUpdateSuccess())
@@ -502,12 +510,12 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
             _logger.Information("Delegated pending update completed successfully");
         }
 
-        if (PendingUpdateApplier.TryConsumeDelegatedUpdateFailure(out string delegatedUpdateFailureReason))
+        if (PendingUpdateApplier.TryReadDelegatedUpdateFailure(out string delegatedUpdateFailureReason))
         {
+            // 上次委托更新失败：标志文件保留供后续启动检测，此处仅置资源损坏标志并放行启动，
+            // 修复弹窗须等主窗口显示后（AsstProxy.Init）再弹，避免成为唯一窗口导致进程意外退出
             _logger.Error("Delegated pending update failed. Reason: {Reason}", delegatedUpdateFailureReason);
-            ShowPendingUpdateRecoveryDialog();
-            Shutdown();
-            return;
+            MarkResourceBroken();
         }
 
         if (TryGetUnsupportedInstallLocation(out string unsupportedLocation))
@@ -522,7 +530,7 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
                 LocalizationHelper.GetString("Error"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
-            Shutdown();
+            FlushLogAndExit();
             return;
         }
 
@@ -533,7 +541,7 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
             if (pendingUpdateResult.Delegated)
             {
                 _logger.Information("Pending update package handed off to external updater, exiting current process");
-                Shutdown();
+                FlushLogAndExit();
                 return;
             }
 
@@ -547,16 +555,17 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
             {
                 _logger.Error("Pending update package could not be delegated because MAA.Updater.exe is missing. Reason: {Reason}", pendingUpdateResult.FailureReason);
                 ShowPendingUpdateMissingUpdaterDialog();
-                Shutdown();
+                FlushLogAndExit();
                 return;
             }
 
             if (pendingUpdateResult.RequiresManualRecovery)
             {
+                // 进程内应用失败且安装已变动：写入失败标志持久化，与委托更新失败共用
+                // 主窗口显示后的修复弹窗路径，此处不退出
                 _logger.Error("Pending update package left the installation in an incomplete state. Reason: {Reason}", pendingUpdateResult.FailureReason);
-                ShowPendingUpdateRecoveryDialog();
-                Shutdown();
-                return;
+                PendingUpdateApplier.MarkDelegatedUpdateFailure(pendingUpdateResult.FailureReason ?? string.Empty);
+                MarkResourceBroken();
             }
 
             _logger.Warning("Pending update package could not be applied, continuing with normal startup");
@@ -565,7 +574,7 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
         ConfigConverter.ConvertConfig();
         ETagCache.Load();
 
-        if (ConfigFactory.Root.GUI.IgnoreBadModulesAndUseSoftwareRendering)
+        if (ConfigFactory.Root.Gui.IgnoreBadModulesAndUseSoftwareRendering)
         {
             RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
             _logger.Information("Using software rendering mode due to user preference (bad modules detected)");
@@ -595,7 +604,7 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
                 _logger.Fatal("Unknown DLL(s) detected: {UnknownDlls}", string.Join(", ", unknownDlls));
-                Shutdown();
+                FlushLogAndExit();
                 return;
             }
         }
@@ -620,13 +629,13 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
                 Process.Start(startInfo);
             }
 
-            Shutdown();
+            FlushLogAndExit();
             return;
         }
 
         if (!HandleMultipleInstances())
         {
-            Shutdown();
+            FlushLogAndExit();
             return;
         }
 
@@ -674,10 +683,8 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
 
     private static bool HandleMultipleInstances()
     {
-        string instanceKey = GetSingleInstanceKey();
-        string mutexName = "MAA_" + instanceKey;
-        string activationEventName = "MAA_SHOW_" + instanceKey;
-        _mutex = new Mutex(true, mutexName, out var isOnlyInstance);
+        string activationEventName = "MAA_SHOW_" + InstanceKey;
+        _mutex = new Mutex(true, MutexName, out var isOnlyInstance);
 
         try
         {
@@ -709,13 +716,18 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
         }
     }
 
-    private static string GetSingleInstanceKey()
+    public static string InstanceKey
     {
-        var normalizedBaseDir = Path.GetFullPath(PathsHelper.BaseDir)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-            .ToUpperInvariant();
-        return normalizedBaseDir.StableHash();
+        get
+        {
+            var normalizedBaseDir = Path.GetFullPath(PathsHelper.BaseDir)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .ToUpperInvariant();
+            return normalizedBaseDir.StableHash();
+        }
     }
+
+    public static string MutexName => "MAA_" + InstanceKey;
 
     private static void EnsureInstanceActivationEvent(string activationEventName)
     {
@@ -884,7 +896,7 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
         var maxTimeInterval = Math.Max(buildTimeInterval, resourceTimeInterval);
         if (maxTimeInterval > 90)
         {
-            Instances.TaskQueueViewModel.LogItemViewModels.Add(new(string.Format(LocalizationHelper.GetString("Achievement.Martian.ConditionsTip"), (maxTimeInterval / 30.436875).ToString("F2")), UiLogColor.Error));
+            Instances.TaskQueueViewModel.LogItemViewModels.Add(new(LocalizationHelper.GetStringFormat("Achievement.Martian.ConditionsTip", (maxTimeInterval / 30.436875).ToString("F2")), UiLogColor.Error));
         }
     }
 
@@ -993,41 +1005,89 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
         _mutex?.Dispose();
     }
 
+    /// <summary>
+    /// 更新后「立即重启」链写入的启动参数：本次进程跳过「启动后直接运行 / 启动模拟器」。
+    /// 选择「稍后」再手动启动不会带此参数。
+    /// </summary>
+    public const string SkipStartupAutoRunArg = "--skip-startup-auto-run";
+
     private static bool _isRestartingWithoutArgs;
     private static ProcessStartInfo _restartStartInfo;
+    private static bool _skipStartupAutoRun;
+
+    /// <summary>
+    /// Gets a value indicating whether the current process should skip startup auto-run
+    /// (tasks / emulator launch after MAA start).
+    /// </summary>
+    public static bool ShouldSkipStartupAutoRun => _skipStartupAutoRun;
+
+    private static bool _isResourceBroken;
+
+    /// <summary>
+    /// Gets a value indicating whether Core resource loading failed this session.
+    /// 置位后所有任务入口（启动自动运行、按钮、热键、托盘、远程）均被拦截，
+    /// 启动完整性检查也不再弹缺失修复窗，修复入口统一由资源损坏弹窗提供。
+    /// </summary>
+    public static bool IsResourceBroken => _isResourceBroken;
+
+    /// <summary>
+    /// 标记 Core 资源加载失败。必须在弹出资源损坏弹窗之前调用，
+    /// 保证弹窗显示期间任务启动已被拦截。
+    /// </summary>
+    public static void MarkResourceBroken() => _isResourceBroken = true;
 
     /// <summary>
     /// 在完整 GUI 尚未初始化前，应用待处理更新后立即重启。
+    /// 若当前进程已带 <see cref="SkipStartupAutoRunArg"/>，则原样转发给下一进程。
     /// </summary>
     private static void RestartAfterPendingUpdateEarly()
     {
         _logger.Information("Pending update package applied, restarting application");
         if (Environment.ProcessPath is not null)
         {
-            Process.Start(new ProcessStartInfo {
+            var startInfo = new ProcessStartInfo {
                 FileName = Environment.ProcessPath,
                 WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
-                UseShellExecute = true,
-            });
+                UseShellExecute = false,
+            };
+            foreach (string arg in GetForwardableRestartArgs())
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+
+            Process.Start(startInfo);
         }
 
-        Environment.Exit(0);
+        FlushLogAndExit();
     }
 
-    private static void ShowPendingUpdateRecoveryDialog()
+    /// <summary>
+    /// 获取需要转发给下一进程的启动参数（当前仅转发 skip-startup-auto-run）。
+    /// </summary>
+    /// <returns>需要转发的参数数组；无需转发时为空数组。</returns>
+    public static string[] GetForwardableRestartArgs()
     {
-        MessageBoxHelper.Show(
-            LocalizationHelper.GetString("UpdateApplyFailed"),
-            LocalizationHelper.GetString("Error"),
-            icon: MessageBoxImage.Error);
+        return ShouldSkipStartupAutoRun ? [SkipStartupAutoRunArg] : [];
+    }
+
+    /// <summary>
+    /// 若启动设置允许，返回「更新后立即重启」链应写入的参数；否则返回空。
+    /// 仅用于自动安装或更新提示中选择立即重启；「稍后」手动启动不调用此方法。
+    /// </summary>
+    /// <returns>应写入的参数数组；选项关闭时为空数组。</returns>
+    public static string[] GetUpdateRestartArgsIfEnabled()
+    {
+        return ConfigFactory.CurrentConfig.Gui.StartUpSettings.SkipStartupAutoRunAfterUpdate
+            ? [SkipStartupAutoRunArg]
+            : [];
     }
 
     private static void ShowPendingUpdateMissingUpdaterDialog()
     {
         MessageBoxHelper.Show(
-        LocalizationHelper.GetString("UpdateApplyMissingUpdater"),
-        LocalizationHelper.GetString("Error"),
-        icon: MessageBoxImage.Error);
+            LocalizationHelper.GetString("UpdateApplyMissingUpdater"),
+            LocalizationHelper.GetString("Error"),
+            icon: MessageBoxImage.Error);
     }
 
     /// <summary>
@@ -1039,6 +1099,34 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
         _isRestartingWithoutArgs = true;
         _logger.Information("Shutdown and restart without Args, call by `{Caller}`", caller);
         Execute.OnUIThread(Application.Current.Shutdown);
+    }
+
+    /// <summary>
+    /// 重启，并带上指定启动参数。
+    /// </summary>
+    /// <param name="args">传给下一进程的参数，例如 <c>--skip-startup-auto-run</c>。</param>
+    public static void ShutdownAndRestartWithArgs(params string[] args)
+    {
+        if (Environment.ProcessPath is null)
+        {
+            ShutdownAndRestartWithoutArgs();
+            return;
+        }
+
+        var startInfo = new ProcessStartInfo {
+            FileName = Environment.ProcessPath,
+            WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+            UseShellExecute = false,
+        };
+        if (args is not null)
+        {
+            foreach (string arg in args.Where(static a => !string.IsNullOrWhiteSpace(a)))
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+        }
+
+        ShutdownAndRestartWith(startInfo);
     }
 
     /// <summary>
@@ -1068,6 +1156,17 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
     }
 
     /// <summary>
+    /// 落盘日志后立即结束进程，供启动中止分支使用。
+    /// 仅限 OnStart 早期调用：此时互斥量与主窗口尚未创建，<see cref="OnExit"/> 的清理流程不适用。
+    /// </summary>
+    private static void FlushLogAndExit()
+    {
+        // Environment.Exit 不经过 WPF 关闭流程，日志需先显式落盘
+        Log.CloseAndFlush();
+        Environment.Exit(0);
+    }
+
+    /// <summary>
     /// 以管理员权限重启应用，UAC 弹窗在退出时触发。
     /// </summary>
     public static void RestartAsAdmin()
@@ -1086,7 +1185,12 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
 
     private static bool _isWaitingToRestart;
 
-    public static async Task RestartAfterIdleAsync()
+    /// <summary>
+    /// 等待空闲后重启。可选带上启动参数（如更新链的 <see cref="SkipStartupAutoRunArg"/>）。
+    /// </summary>
+    /// <param name="args">传给下一进程的参数；为空则无参重启。</param>
+    /// <returns>表示异步等待的任务。</returns>
+    public static async Task RestartAfterIdleAsync(params string[] args)
     {
         if (_isWaitingToRestart)
         {
@@ -1095,13 +1199,29 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
 
         _isWaitingToRestart = true;
 
-        await RunningState.Instance.UntilIdleAsync(60000);
-        ShutdownAndRestartWithoutArgs();
+        await RunningState.Instance.UntilIdleAsync();
+        if (args is { Length: > 0 })
+        {
+            ShutdownAndRestartWithArgs(args);
+        }
+        else
+        {
+            ShutdownAndRestartWithoutArgs();
+        }
     }
 
     /// <inheritdoc/>
     protected override void OnUnhandledException(DispatcherUnhandledExceptionEventArgs e)
     {
+        // hc:Window 初始化竞态：SystemCommands.MaximizeWindowCommand.CanExecute 在 HWND
+        // 未就绪时调 Win32 API 抛 ElementNotEnabledException（https://github.com/HandyOrg/HandyControl/issues/1757）。
+        // 属瞬时竞态，静默忽略即可，无需弹窗或写日志。
+        if (e.Exception is ElementNotEnabledException)
+        {
+            e.Handled = true;
+            return;
+        }
+
         LogUnhandledException(e.Exception);
         ShowErrorDialog(e.Exception);
         e.Handled = true;
@@ -1109,20 +1229,35 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
 
     private static void LogUnhandledException(Exception exception)
     {
-        if (_logger != Logger.None)
+        if (_logger == Logger.None)
         {
-            _logger.Fatal(exception, "Unhandled exception occurred");
+            return;
         }
+
+        _logger.Fatal(exception, "Unhandled exception occurred");
     }
 
     private static void ShowErrorDialog(Exception exception)
     {
         Application.Current.Dispatcher.Invoke(() => {
-            // DragDrop.DoDragSourceMove 会导致崩溃，但不需要退出程序
+            // 这些异常虽然会导致崩溃，但不需要退出程序
             // 这是一坨屎，但是没办法，只能这样了
-            var isDragDropException = exception is COMException && exception.ToString()!.Contains("DragDrop.DoDragSourceMove");
+            var comEx = exception as COMException;
 
-            var shouldExit = !isDragDropException;
+            var details = exception.ToString();
+
+            // DragDrop.DoDragSourceMove 会在拖拽时偶发崩溃
+            var isDragDropException = comEx != null && details.Contains("DragDrop.DoDragSourceMove");
+
+            // DWM 桌面组合被禁用（0x80263001），通常是瞬时的显卡驱动问题，DWM 会自行恢复
+            // 同时用 HResult 与异常文本双重判断，避免不同 .NET 版本/语言环境下 HRESULT 暴露不一致
+            const int DwmECompositionDisabled = unchecked((int)0x80263001);
+            var isDwmCompositionDisabledException = comEx != null &&
+                (comEx.HResult == DwmECompositionDisabled ||
+                 details.Contains("Desktop composition is disabled") ||
+                 details.Contains("0x80263001"));
+
+            var shouldExit = !isDragDropException && !isDwmCompositionDisabledException;
 
             var errorView = new ErrorDialogView(exception, shouldExit);
             errorView.ShowDialog();
@@ -1183,7 +1318,6 @@ public class Bootstrapper : Bootstrapper<RootViewModel>
     private static bool UpdateConfiguration(string desiredConfig)
     {
         // 配置名可能就包在引号中，需要转义符，如 \"a\"
-        string currentConfig = ConfigurationHelper.GetCurrentConfiguration();
-        return currentConfig != desiredConfig && ConfigurationHelper.SwitchConfiguration(desiredConfig) && ConfigFactory.SwitchConfig(desiredConfig);
+        return ConfigFactory.Root.Current != desiredConfig && ConfigFactory.SwitchConfig(desiredConfig);
     }
 }

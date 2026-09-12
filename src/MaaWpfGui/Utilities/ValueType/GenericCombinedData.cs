@@ -19,8 +19,15 @@ namespace MaaWpfGui.Utilities.ValueType;
 /// Generic combined data class.
 /// </summary>
 /// <typeparam name="TValueType">The type of value.</typeparam>
-public class GenericCombinedData<TValueType> : PropertyChangedBase
+public class GenericCombinedData<TValueType>() : PropertyChangedBase
 {
+    public GenericCombinedData(string name, TValueType value)
+        : this()
+    {
+        _name = name;
+        _value = value;
+    }
+
     private string _name = string.Empty;
 
     /// <summary>
@@ -41,5 +48,17 @@ public class GenericCombinedData<TValueType> : PropertyChangedBase
     {
         get => _value;
         set => SetAndNotify(ref _value, value);
+    }
+
+    private bool _isEnabled = true;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the item is selectable.
+    /// 供 ItemContainerStyle 绑定以置灰不可选项。
+    /// </summary>
+    public bool IsEnabled
+    {
+        get => _isEnabled;
+        set => SetAndNotify(ref _isEnabled, value);
     }
 }

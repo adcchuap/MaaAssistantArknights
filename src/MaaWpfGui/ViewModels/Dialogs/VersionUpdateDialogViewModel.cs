@@ -16,13 +16,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
-using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Constants;
 using MaaWpfGui.Constants.Enums;
 using MaaWpfGui.Extensions;
@@ -34,13 +33,11 @@ using MaaWpfGui.States;
 using MaaWpfGui.Utilities;
 using MaaWpfGui.ViewModels.UI;
 using MaaWpfGui.ViewModels.UserControl.Settings;
-using Microsoft.VisualBasic.FileIO;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Semver;
 using Serilog;
 using Stylet;
-using SearchOption = System.IO.SearchOption;
 
 namespace MaaWpfGui.ViewModels.Dialogs;
 
@@ -78,25 +75,29 @@ public class VersionUpdateDialogViewModel : Screen
 
     private string _latestVersion = string.Empty;
 
-    private string _updateTag = FakeUpdateHelper.IsEnabled
-        ? FakeUpdateHelper.TargetVersion
-        : ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionName, string.Empty);
-
     /// <summary>
     /// Gets or sets the update tag.
     /// </summary>
     public string UpdateTag
     {
-        get => _updateTag;
-        set {
-            SetAndNotify(ref _updateTag, value);
-            ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionName, value);
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.Root.Update.Name = value;
         }
+    } = FakeUpdateHelper.IsEnabled ? FakeUpdateHelper.TargetVersion : ConfigFactory.Root.Update.Name;
+
+    private static string LoadUpdateBody()
+    {
+        var body = MarkdownDataHelper.Get("CHANGELOG");
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            return body;
+        }
+
+        return string.Empty;
     }
 
-    private string _updateInfo = FakeUpdateHelper.IsEnabled && !string.IsNullOrWhiteSpace(FakeUpdateHelper.UpdateInfo)
-        ? FakeUpdateHelper.UpdateInfo
-        : ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionUpdateBody, string.Empty);
+    private string _updateInfo = LoadUpdateBody();
 
     // private static readonly MarkdownPipeline s_markdownPipeline = new MarkdownPipelineBuilder().UseXamlSupportedExtensions().Build();
 
@@ -118,48 +119,36 @@ public class VersionUpdateDialogViewModel : Screen
 
         set {
             SetAndNotify(ref _updateInfo, value);
-            ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdateBody, value);
+            MarkdownDataHelper.Set("CHANGELOG", value);
         }
     }
-
-    private string _updateUrl = string.Empty;
 
     /// <summary>
     /// Gets or sets the update URL.
     /// </summary>
-    public string UpdateUrl
-    {
-        get => _updateUrl;
-        set => SetAndNotify(ref _updateUrl, value);
-    }
-
-    private bool _isFirstBootAfterUpdate = Convert.ToBoolean(ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionUpdateIsFirstBoot, bool.FalseString));
+    public string UpdateUrl { get; set => SetAndNotify(ref field, value); } = string.Empty;
 
     /// <summary>
     /// Gets or sets a value indicating whether it is the first boot after updating.
     /// </summary>
     public bool IsFirstBootAfterUpdate
     {
-        get => _isFirstBootAfterUpdate;
-        set {
-            SetAndNotify(ref _isFirstBootAfterUpdate, value);
-            ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdateIsFirstBoot, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.Root.Update.IsFirstBoot = value;
         }
-    }
-
-    private string _updatePackageName = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionUpdatePackage, string.Empty);
+    } = ConfigFactory.Root.Update.IsFirstBoot;
 
     /// <summary>
     /// Gets or sets the name of the update package.
     /// </summary>
     public string UpdatePackageName
     {
-        get => _updatePackageName;
-        set {
-            SetAndNotify(ref _updatePackageName, value);
-            ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdatePackage, value);
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.Root.Update.UpdatePackage = value;
         }
-    }
+    } = ConfigFactory.Root.Update.UpdatePackage;
 
     /// <summary>
     /// Gets the OS architecture.
@@ -179,6 +168,7 @@ public class VersionUpdateDialogViewModel : Screen
     */
 
     private const string MaaUpdateApi = "version/summary.json";
+    private const int UpdatePackageDownloadMaxAttempts = 3;
 
     private JObject? _latestJson;
     private JObject? _assetsObject;
@@ -260,19 +250,16 @@ public class VersionUpdateDialogViewModel : Screen
         MirrorChyan,
     }
 
-    private bool _doNotShowUpdate = Convert.ToBoolean(ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionUpdateDoNotShowUpdate, bool.FalseString));
-
     /// <summary>
     /// Gets or sets a value indicating whether to show the update.
     /// </summary>
     public bool DoNotShowUpdate
     {
-        get => _doNotShowUpdate;
-        set {
-            SetAndNotify(ref _doNotShowUpdate, value);
-            ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdateDoNotShowUpdate, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.Root.Update.DoNotShowUpdate = value;
         }
-    }
+    } = ConfigFactory.Root.Update.DoNotShowUpdate;
 
     /// <summary>
     /// 如果是在更新后第一次启动，显示ReleaseNote弹窗，否则检查更新并下载更新包。
@@ -297,7 +284,7 @@ public class VersionUpdateDialogViewModel : Screen
 
             if (!IsDebugVersion())
             {
-                if (SettingsViewModel.VersionUpdateSettings.UpdateSource == "MirrorChyan" && string.IsNullOrEmpty(SettingsViewModel.VersionUpdateSettings.MirrorChyanCdk))
+                if (SettingsViewModel.VersionUpdateSettings.UpdateSource == UpdateSource.MirrorChyan && string.IsNullOrEmpty(SettingsViewModel.VersionUpdateSettings.MirrorChyanCdk))
                 {
                     _ = Task.Run(() =>
                         MessageBoxHelper.Show(
@@ -396,10 +383,6 @@ public class VersionUpdateDialogViewModel : Screen
         const double MinimumDetectedNewVersionDisplaySeconds = 0.5d;
 
         UpdateTag = FakeUpdateHelper.TargetVersion;
-        if (!string.IsNullOrWhiteSpace(FakeUpdateHelper.UpdateInfo))
-        {
-            UpdateInfo = FakeUpdateHelper.UpdateInfo;
-        }
 
         UpdatePackageName = "MirrorChyanApp" + UpdateTag + ".zip";
 
@@ -525,7 +508,7 @@ public class VersionUpdateDialogViewModel : Screen
         string? rawUrl = _assetsObject["browser_download_url"]?.ToString();
         var urls = new List<string>();
 
-        if (SettingsViewModel.VersionUpdateSettings.UpdateSource == "Github" && !SettingsViewModel.VersionUpdateSettings.ForceGithubGlobalSource)
+        if (SettingsViewModel.VersionUpdateSettings.UpdateSource == UpdateSource.GitHub && !SettingsViewModel.VersionUpdateSettings.ForceGithubGlobalSource)
         {
             var mirrors = _assetsObject["mirrors"]?.ToObject<List<string>>();
 
@@ -549,7 +532,7 @@ public class VersionUpdateDialogViewModel : Screen
         var tasks = urls.ConvertAll(url => Instances.HttpService.HeadAsync(new Uri(url)));
         var latencies = await Task.WhenAll(tasks);
 
-        var proxy = ConfigurationHelper.GetValue(ConfigurationKeys.UpdateProxy, string.Empty);
+        var proxy = ConfigFactory.Root.Update.Proxy;
         var hasProxy = !string.IsNullOrEmpty(proxy);
 
         // select the fastest mirror
@@ -742,6 +725,299 @@ public class VersionUpdateDialogViewModel : Screen
             LocalizationHelper.GetString("LocalUpdatePackageImportedTitle"));
     }
 
+    /// <summary>
+    /// 完整性修复流程的结果。
+    /// </summary>
+    public enum IntegrityRepairResult
+    {
+        /// <summary>
+        /// 完整包已注册为待应用更新，等待重启。
+        /// </summary>
+        Succeeded,
+
+        /// <summary>
+        /// 用户在完整包风险确认弹窗中主动取消。
+        /// </summary>
+        Canceled,
+
+        /// <summary>
+        /// 解析下载源、下载或注册包失败。
+        /// </summary>
+        Failed,
+    }
+
+    private bool _isIntegrityRepairRunning;
+
+    /// <summary>
+    /// Gets a value indicating whether an integrity repair is in progress.
+    /// 另一入口已在修复时，资源损坏弹窗据此跳过弹窗与退出，其余入口不再重复触发下载。
+    /// </summary>
+    public bool IsIntegrityRepairRunning => _isIntegrityRepairRunning;
+
+    /// <summary>
+    /// 资源完整性修复：重新下载当前渠道的完整包并注册为待应用更新。
+    /// 用户已在弹窗中确认，不做版本新旧判断（允许重装同版本）。
+    /// 修复进行中重复调用直接视为已处理，避免并发下载。
+    /// </summary>
+    /// <returns>修复流程的结果，用于区分成功、用户取消与失败。</returns>
+    public async Task<IntegrityRepairResult> RunIntegrityRepairAsync()
+    {
+        if (_isIntegrityRepairRunning)
+        {
+            _logger.Information("Integrity repair already running, treat as accepted");
+            return IntegrityRepairResult.Succeeded;
+        }
+
+        _isIntegrityRepairRunning = true;
+        try
+        {
+            return await RunIntegrityRepairCoreAsync();
+        }
+        finally
+        {
+            _isIntegrityRepairRunning = false;
+        }
+    }
+
+    /// <summary>
+    /// 执行完整性修复的主体流程，由 <see cref="RunIntegrityRepairAsync"/> 包装调用。
+    /// </summary>
+    /// <returns>修复流程的结果，用于区分成功、用户取消与失败。</returns>
+    private async Task<IntegrityRepairResult> RunIntegrityRepairCoreAsync()
+    {
+        _logger.Information("Starting integrity repair");
+        OutputDownloadProgress(LocalizationHelper.GetString("ResourceIntegrityRepairDownloading"), downloading: false);
+
+        // 后续需要弹窗询问重启，保持 UI 上下文，不使用 ConfigureAwait(false)
+
+        // 先解析下载源并确认完整包覆盖风险，再执行下载；
+        // 与其他完整包更新入口保持一致，用户拒绝时不必下载 200MB+ 的完整包
+        // 仅当更新来源配置为 MirrorChyan 且已填写 CDK 时走 MirrorChyan，其余来源直接走 maaApi
+        var cdk = SettingsViewModel.VersionUpdateSettings.MirrorChyanCdk.Trim();
+        bool useMirrorChyan = SettingsViewModel.VersionUpdateSettings.UpdateSource == UpdateSource.MirrorChyan && !string.IsNullOrEmpty(cdk);
+
+        var mirrorChyanPackage = useMirrorChyan ? await ResolveMirrorChyanRepairPackageAsync(cdk) : null;
+        var maaApiPackage = mirrorChyanPackage is null ? await ResolveMaaApiRepairPackageAsync() : null;
+        if (mirrorChyanPackage is null && maaApiPackage is null)
+        {
+            FailIntegrityRepair("Integrity repair: no full package source resolved");
+            return IntegrityRepairResult.Failed;
+        }
+
+        string plannedPackagePath = GetPlannedUpdatePackagePath(mirrorChyanPackage?.PackageName ?? maaApiPackage!.PackageName);
+        if (!ConfirmFullPackageUpdate(plannedPackagePath))
+        {
+            _logger.Information("Integrity repair full package application canceled by user: {PackagePath}", plannedPackagePath);
+
+            // 反馈走任务队列的下载日志，与更新包下载失败的提示通道一致
+            OutputDownloadProgress(LocalizationHelper.GetString("ResourceIntegrityRepairCanceled"), downloading: false);
+            return IntegrityRepairResult.Canceled;
+        }
+
+        string? packagePath = null;
+        if (mirrorChyanPackage is not null)
+        {
+            _logger.Information("Integrity repair: downloading full package {PackageName} from MirrorChyan", mirrorChyanPackage.PackageName);
+            OutputDownloadProgress(LocalizationHelper.GetString("ResourceIntegrityRepairDownloading"), downloading: true, globalSource: false);
+            if (await DownloadFromMirrorChyan(mirrorChyanPackage.DownloadUrl, mirrorChyanPackage.PackageName))
+            {
+                packagePath = GetPlannedUpdatePackagePath(mirrorChyanPackage.PackageName);
+            }
+            else
+            {
+                _logger.Warning("Integrity repair: MirrorChyan download failed, falling back to maaApi");
+            }
+        }
+
+        if (packagePath is null)
+        {
+            maaApiPackage ??= await ResolveMaaApiRepairPackageAsync();
+            if (maaApiPackage is null)
+            {
+                FailIntegrityRepair("Integrity repair: no full package resolved from maaApi");
+                return IntegrityRepairResult.Failed;
+            }
+
+            _logger.Information("Integrity repair: downloading full package {PackageName} from maaApi", maaApiPackage.PackageName);
+            OutputDownloadProgress(LocalizationHelper.GetString("ResourceIntegrityRepairDownloading"), downloading: true, globalSource: true);
+            foreach (string url in maaApiPackage.DownloadUrls)
+            {
+                if (await DownloadGithubAssets(url, maaApiPackage.Asset))
+                {
+                    packagePath = GetPlannedUpdatePackagePath(maaApiPackage.PackageName);
+                    break;
+                }
+            }
+        }
+
+        if (packagePath is null)
+        {
+            FailIntegrityRepair("Integrity repair download failed from all sources");
+            return IntegrityRepairResult.Failed;
+        }
+
+        string arch = IsArm ? "arm64" : "x64";
+
+        var importResult = PendingUpdateApplier.TryRegisterLocalPackage(
+            packagePath,
+            _curVersion,
+            arch,
+            inspection: null,
+            allowSameVersion: true);
+        if (importResult.Status is not PendingUpdateApplier.LocalPackageImportStatus.FullPackageRegistered
+            and not PendingUpdateApplier.LocalPackageImportStatus.OtaPackageRegistered)
+        {
+            _logger.Error("Integrity repair package rejected: status={Status}, packagePath={PackagePath}", importResult.Status, packagePath);
+            FailIntegrityRepair("Integrity repair package rejected");
+            return IntegrityRepairResult.Failed;
+        }
+
+        _logger.Information("Integrity repair package registered: {PackagePath}", packagePath);
+        OutputDownloadProgress(downloading: false, output: LocalizationHelper.GetString("NewVersionDownloadCompletedTitle"));
+        await AskToRestartForImportedPackage();
+        return IntegrityRepairResult.Succeeded;
+    }
+
+    /// <summary>
+    /// 输出完整性修复失败的状态（gui.log 与任务队列下载日志，不弹 Toast）。
+    /// </summary>
+    /// <param name="reason">失败原因（仅记录日志）。</param>
+    private void FailIntegrityRepair(string reason)
+    {
+        _logger.Error(reason);
+        OutputDownloadProgress(downloading: false, output: LocalizationHelper.GetString("ResourceIntegrityRepairFailed"));
+    }
+
+    private sealed record MirrorChyanRepairPackage(string PackageName, string DownloadUrl);
+
+    private sealed record MaaApiRepairPackage(string PackageName, JObject Asset, IReadOnlyList<string> DownloadUrls);
+
+    /// <summary>
+    /// 获取当前更新渠道的 MirrorChyan / maaApi 标识（stable / beta / alpha）。
+    /// </summary>
+    /// <returns>渠道标识字符串。</returns>
+    private static string GetUpdateChannel()
+    {
+        return SettingsViewModel.VersionUpdateSettings.VersionType switch {
+            VersionUpdateSettingsUserControlModel.UpdateVersionType.Beta => "beta",
+            VersionUpdateSettingsUserControlModel.UpdateVersionType.Nightly => "alpha",
+            _ => "stable",
+        };
+    }
+
+    /// <summary>
+    /// 构造 MirrorChyan 更新查询 URL。
+    /// </summary>
+    /// <param name="cdk">MirrorChyan CDK。</param>
+    /// <param name="currentVersion">当前版本；传 null 时不携带，MirrorChyan 视为全新安装并直接返回完整包。</param>
+    /// <returns>查询 URL。</returns>
+    private string BuildMirrorChyanUpdateUrl(string cdk, string? currentVersion)
+    {
+        string arch = IsArm ? "arm64" : "x64";
+        var spid = HardwareInfoUtility.GetMachineGuid().StableHash();
+        string currentVersionPart = string.IsNullOrEmpty(currentVersion) ? string.Empty : $"current_version={currentVersion}&";
+        return $"{MaaUrls.MirrorChyanAppUpdate}?{currentVersionPart}cdk={cdk}&user_agent=MaaWpfGui&os=win&arch={arch}&channel={GetUpdateChannel()}&sp_id={spid}";
+    }
+
+    /// <summary>
+    /// 从 MirrorChyan 解析当前渠道完整包的下载信息（不执行下载）。
+    /// </summary>
+    /// <param name="cdk">已非空的 MirrorChyan CDK（调用方保证更新来源为 MirrorChyan）。</param>
+    /// <returns>解析结果；解析失败时返回 null，交给 maaApi 兜底。</returns>
+    private async Task<MirrorChyanRepairPackage?> ResolveMirrorChyanRepairPackageAsync(string cdk)
+    {
+        try
+        {
+            // 修复场景不传当前版本：MirrorChyan 视为全新安装，直接返回完整包，
+            // 避免已是最新版本时拿不到下载地址
+            string url = BuildMirrorChyanUpdateUrl(cdk, currentVersion: null);
+
+            var data = await FetchMirrorChyanJsonAsync(url).ConfigureAwait(false);
+            string? downloadUrl = data?["data"]?["url"]?.ToString();
+            string? versionName = data?["data"]?["version_name"]?.ToString();
+            if (string.IsNullOrEmpty(downloadUrl) || string.IsNullOrEmpty(versionName))
+            {
+                // 交给 maaApi 兜底
+                return null;
+            }
+
+            // 文件名需符合完整包命名规范（MAA-vX.X.X-win-x64.zip），否则注册时的包名校验不通过
+            return new MirrorChyanRepairPackage($"MAA-{versionName}-win-{(IsArm ? "arm64" : "x64")}.zip", downloadUrl);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to resolve full package from MirrorChyan for integrity repair");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 从 maaApi 解析当前渠道完整包的下载信息（不执行下载）。
+    /// </summary>
+    /// <returns>解析结果；解析失败时返回 null。</returns>
+    private async Task<MaaApiRepairPackage?> ResolveMaaApiRepairPackageAsync()
+    {
+        try
+        {
+            string versionType = GetUpdateChannel();
+
+            var (_, json) = await Instances.MaaApiService.RequestMaaApiWithCache($"version/{versionType}.json", false).ConfigureAwait(false);
+            var assets = (JArray?)json?["details"]?["assets"];
+            if (assets is null)
+            {
+                return null;
+            }
+
+            // 与 GetVersionDetailsByMaaApi 一致，只认 MAA-<版本>-win-<架构>.zip 命名，
+            // 避免误选同样含 win 的 DebugSymbol 等组件资产
+            string? latestVersion = json?["version"]?.ToString();
+            if (string.IsNullOrEmpty(latestVersion))
+            {
+                _logger.Error("No version found on maaApi for integrity repair");
+                return null;
+            }
+
+            string versionPrefix = $"maa-{latestVersion.ToLower()}-";
+            foreach (var asset in assets)
+            {
+                string? name = asset["name"]?.ToString().ToLower();
+                if (name is null || (IsArm ^ name.Contains("arm")) || !name.Contains("win") || name.Contains("ota"))
+                {
+                    continue;
+                }
+
+                if (!name.Contains(versionPrefix) || asset is not JObject fullPackage)
+                {
+                    continue;
+                }
+
+                string packageName = fullPackage["name"]!.ToString();
+                string? rawUrl = fullPackage["browser_download_url"]?.ToString();
+                if (string.IsNullOrEmpty(rawUrl))
+                {
+                    return null;
+                }
+
+                var urls = new List<string>();
+                if (fullPackage["mirrors"]?.ToObject<List<string>>() is { } mirrors)
+                {
+                    urls.AddRange(mirrors);
+                }
+
+                urls.Add(rawUrl);
+                return new MaaApiRepairPackage(packageName, fullPackage, urls);
+            }
+
+            _logger.Error("No full package asset found on maaApi for integrity repair");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to resolve full package from maaApi for integrity repair");
+            return null;
+        }
+    }
+
     public static bool ConfirmFullPackageUpdate(string packagePath)
     {
         string baseDir = Path.GetFullPath(PathsHelper.BaseDir);
@@ -750,7 +1026,7 @@ public class VersionUpdateDialogViewModel : Screen
             : GetPlannedUpdatePackagePath(packagePath);
 
         MessageBoxResult result = MessageBoxHelper.Show(
-            string.Format(LocalizationHelper.GetString("PendingFullUpdateManualConfirmDesc"), baseDir, normalizedPackagePath),
+            LocalizationHelper.GetStringFormat("PendingFullUpdateManualConfirmDesc", baseDir, normalizedPackagePath),
             LocalizationHelper.GetString("PendingFullUpdateManualConfirmTitle"),
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning,
@@ -762,20 +1038,24 @@ public class VersionUpdateDialogViewModel : Screen
 
     private async Task AskToRestartCore(string description, string title)
     {
+        // 自动安装，或用户点「立即更新/确定」：按启动设置决定是否写入 --skip-startup-auto-run。
+        // 选「稍后」不会走到这里，之后手动启动是正常流程，不会带 skip 参数。
+        string[] updateRestartArgs = Bootstrapper.GetUpdateRestartArgsIfEnabled();
+
         if (SettingsViewModel.VersionUpdateSettings.AutoInstallUpdatePackage)
         {
             if (FakeUpdateHelper.HasPendingFakeUpdate)
             {
-                await _runningState.UntilIdleAsync(1000);
+                await _runningState.UntilIdleAsync();
                 _ = FakeUpdateHelper.Updating();
                 return;
             }
 
-            await Bootstrapper.RestartAfterIdleAsync();
+            await Bootstrapper.RestartAfterIdleAsync(updateRestartArgs);
             return;
         }
 
-        await _runningState.UntilIdleAsync(10000);
+        await _runningState.UntilIdleAsync();
 
         var result = MessageBoxHelper.Show(
             description,
@@ -792,7 +1072,14 @@ public class VersionUpdateDialogViewModel : Screen
                 return;
             }
 
-            Bootstrapper.ShutdownAndRestartWithoutArgs();
+            if (updateRestartArgs.Length > 0)
+            {
+                Bootstrapper.ShutdownAndRestartWithArgs(updateRestartArgs);
+            }
+            else
+            {
+                Bootstrapper.ShutdownAndRestartWithoutArgs();
+            }
         }
     }
 
@@ -808,7 +1095,7 @@ public class VersionUpdateDialogViewModel : Screen
             return (CheckUpdateRetT.NoNeedToUpdateDebugVersion, null);
         }
 
-        if (SettingsViewModel.VersionUpdateSettings.UpdateSource == "MirrorChyan")
+        if (SettingsViewModel.VersionUpdateSettings.UpdateSource == UpdateSource.MirrorChyan)
         {
             try
             {
@@ -842,15 +1129,11 @@ public class VersionUpdateDialogViewModel : Screen
 
         if (json is null)
         {
-            _logger.Error("Failed to get update info from Maa API.");
+            _logger.Error("Failed to get update info from MAA API.");
             return CheckUpdateRetT.FailedToGetInfo;
         }
 
-        string versionType = SettingsViewModel.VersionUpdateSettings.VersionType switch {
-            VersionUpdateSettingsUserControlModel.UpdateVersionType.Beta => "beta",
-            VersionUpdateSettingsUserControlModel.UpdateVersionType.Nightly => "alpha",
-            _ => "stable",
-        };
+        string versionType = GetUpdateChannel();
 
         var latestVersion = json[versionType]?["version"]?.ToString();
 
@@ -947,54 +1230,19 @@ public class VersionUpdateDialogViewModel : Screen
         _requiresFullPackageConfirmation = false;
 
         var cdk = SettingsViewModel.VersionUpdateSettings.MirrorChyanCdk.Trim();
-        var arch = IsArm ? "arm64" : "x64";
-        string channel = SettingsViewModel.VersionUpdateSettings.VersionType switch {
-            VersionUpdateSettingsUserControlModel.UpdateVersionType.Beta => "beta",
-            VersionUpdateSettingsUserControlModel.UpdateVersionType.Nightly => "alpha",
-            _ => "stable",
-        };
-        var spid = HardwareInfoUtility.GetMachineGuid().StableHash();
+        string url = BuildMirrorChyanUpdateUrl(cdk, currentVersion: _curVersion);
 
-        var url = $"{MaaUrls.MirrorChyanAppUpdate}?current_version={_curVersion}&cdk={cdk}&user_agent=MaaWpfGui&os=win&arch={arch}&channel={channel}&sp_id={spid}";
-
-        HttpResponseMessage? response = null;
-        try
-        {
-            response = await Instances.HttpService.GetAsync(new(url), uriPartial: UriPartial.Path);
-        }
-        catch (Exception e)
-        {
-            _logger.Error(e, "Failed to send GET request to {Uri}", new Uri(url).GetLeftPart(UriPartial.Path));
-            _logger.Information("current_version: {CurVersion}, cdk: {Mask}, arch: {Arch}, channel: {Channel}", _curVersion, cdk.Mask(), arch, channel);
-        }
-
-        if (response is null)
+        var data = await FetchMirrorChyanJsonAsync(url);
+        if (data is null)
         {
             _logger.Error("mirrorc failed");
+            _logger.Information("current_version: {CurVersion}, cdk: {Mask}, arch: {Arch}, channel: {Channel}",
+                _curVersion, cdk.Mask(), IsArm ? "arm64" : "x64", GetUpdateChannel());
             SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkFetchFailed = true;
             return CheckUpdateRetT.NetworkError;
         }
 
-        var jsonStr = await response.Content.ReadAsStringAsync();
-        _logger.Information("{JsonStr}", jsonStr);
-        JObject? data = null;
-        try
-        {
-            data = (JObject?)JsonConvert.DeserializeObject(jsonStr);
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Failed to deserialize json");
-        }
-
-        if (data is null)
-        {
-            SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkFetchFailed = true;
-            return CheckUpdateRetT.UnknownError;
-        }
-
         var mirrorChyanCdkExpired = data["data"]?["cdk_expired_time"]?.ToObject<long?>();
-
         if (mirrorChyanCdkExpired.HasValue)
         {
             SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkExpiredTime = mirrorChyanCdkExpired.Value;
@@ -1005,58 +1253,10 @@ public class VersionUpdateDialogViewModel : Screen
             SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkFetchFailed = true;
         }
 
-        var errorCode = data["code"]?.ToObject<MirrorChyanErrorCode>() ?? MirrorChyanErrorCode.Undivided;
-        if (errorCode != MirrorChyanErrorCode.Success)
+        var errorResult = HandleMirrorChyanErrorCode(data, mirrorChyanCdkExpired);
+        if (errorResult.HasValue)
         {
-            switch (errorCode)
-            {
-                case MirrorChyanErrorCode.KeyExpired:
-                    ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkExpired"));
-
-                    SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkFetchFailed = false;
-
-                    // 有人会第一次就填过期的 cdk 吗
-                    if (SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkExpiredTime == 0)
-                    {
-                        SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkExpiredTime = 1;
-                    }
-
-                    // 如果上次查出来的时间比现在的还新，说明换了 cdk，重置过期时间
-                    if (!SettingsViewModel.VersionUpdateSettings.IsMirrorChyanCdkExpired)
-                    {
-                        SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkExpiredTime = mirrorChyanCdkExpired ?? 1;
-                    }
-
-                    break;
-
-                case MirrorChyanErrorCode.KeyInvalid:
-                    ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkInvalid"));
-                    AchievementTrackerHelper.Instance.Unlock(AchievementIds.MirrorChyanCdkError);
-                    break;
-
-                case MirrorChyanErrorCode.ResourceQuotaExhausted:
-                    ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkQuotaExhausted"));
-                    break;
-
-                case MirrorChyanErrorCode.KeyMismatched:
-                    ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkMismatched"));
-                    break;
-
-                case MirrorChyanErrorCode.KeyBlocked:
-                    ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkBlocked"));
-                    break;
-
-                case MirrorChyanErrorCode.InvalidParams:
-                case MirrorChyanErrorCode.ResourceNotFound:
-                case MirrorChyanErrorCode.InvalidOs:
-                case MirrorChyanErrorCode.InvalidArch:
-                case MirrorChyanErrorCode.InvalidChannel:
-                case MirrorChyanErrorCode.Undivided:
-                    ToastNotification.ShowDirect(data["msg"]?.ToString() ?? LocalizationHelper.GetString("GameResourceFailed"));
-                    break;
-            }
-
-            return CheckUpdateRetT.UnknownError;
+            return errorResult.Value;
         }
 
         var version = data["data"]?["version_name"]?.ToString();
@@ -1070,18 +1270,7 @@ public class VersionUpdateDialogViewModel : Screen
             return CheckUpdateRetT.AlreadyLatest;
         }
 
-        if (data["data"]?["update_type"]?.ToObject<string>() == "full")
-        {
-            _requiresFullPackageConfirmation = true;
-
-            if (SettingsViewModel.VersionUpdateSettings.AutoDownloadUpdatePackage)
-            {
-                using var toast = new ToastNotification(LocalizationHelper.GetString("NewVersionNoOtaPackage"));
-                toast.Show(30);
-                _logger.Warning("No OTA package found, but full package found.");
-                Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("NewVersionNoOtaPackage"), UiLogColor.Warning);
-            }
-        }
+        data = await TryWaitForMirrorChyanOtaAsync(url, data);
 
         // 到这里已经确定有新版本了
         _logger.Information("New version found: {Version}", version);
@@ -1097,6 +1286,134 @@ public class VersionUpdateDialogViewModel : Screen
         _mirrorcDownloadUrl = data["data"]?["url"]?.ToString();
 
         return CheckUpdateRetT.OK;
+    }
+
+    /// <summary>
+    /// 向 MirrorChyan 发送 GET 请求并解析 JSON 响应。
+    /// </summary>
+    /// <returns>解析成功返回 JObject，失败返回 null。</returns>
+    private static async Task<JObject?> FetchMirrorChyanJsonAsync(string url)
+    {
+        try
+        {
+            using var response = await Instances.HttpService.GetAsync(new(url), uriPartial: UriPartial.Path);
+            var jsonStr = await response.Content.ReadAsStringAsync();
+            _logger.Information("MirrorChyan response: {JsonStr}", jsonStr);
+            try
+            {
+                return (JObject?)JsonConvert.DeserializeObject(jsonStr);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Failed to deserialize json from MirrorChyan");
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to send GET request to {Uri}", new Uri(url).GetLeftPart(UriPartial.Path));
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 处理 MirrorChyan 错误码，显示对应的 Toast 提示。
+    /// </summary>
+    /// <returns>成功（无需处理）返回 null，出错返回 CheckUpdateRetT.UnknownError。</returns>
+    private static CheckUpdateRetT? HandleMirrorChyanErrorCode(JObject data, long? mirrorChyanCdkExpired)
+    {
+        var errorCode = data["code"]?.ToObject<MirrorChyanErrorCode>() ?? MirrorChyanErrorCode.Undivided;
+        if (errorCode == MirrorChyanErrorCode.Success)
+        {
+            return null;
+        }
+
+        switch (errorCode)
+        {
+            case MirrorChyanErrorCode.KeyExpired:
+                ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkExpired"));
+                SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkFetchFailed = false;
+
+                // 有人会第一次就填过期的 cdk 吗
+                if (SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkExpiredTime == 0)
+                {
+                    SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkExpiredTime = 1;
+                }
+
+                // 如果上次查出来的时间比现在的还新，说明换了 cdk，重置过期时间
+                if (!SettingsViewModel.VersionUpdateSettings.IsMirrorChyanCdkExpired)
+                {
+                    SettingsViewModel.VersionUpdateSettings.MirrorChyanCdkExpiredTime = mirrorChyanCdkExpired ?? 1;
+                }
+
+                break;
+
+            case MirrorChyanErrorCode.KeyInvalid:
+                ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkInvalid"));
+                AchievementTrackerHelper.Instance.Unlock(AchievementIds.MirrorChyanCdkError);
+                break;
+
+            case MirrorChyanErrorCode.ResourceQuotaExhausted:
+                ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkQuotaExhausted"));
+                break;
+
+            case MirrorChyanErrorCode.KeyMismatched:
+                ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkMismatched"));
+                break;
+
+            case MirrorChyanErrorCode.KeyBlocked:
+                ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanCdkBlocked"));
+                break;
+
+            case MirrorChyanErrorCode.InvalidParams:
+            case MirrorChyanErrorCode.ResourceNotFound:
+            case MirrorChyanErrorCode.InvalidOs:
+            case MirrorChyanErrorCode.InvalidArch:
+            case MirrorChyanErrorCode.InvalidChannel:
+            case MirrorChyanErrorCode.Undivided:
+                ToastNotification.ShowDirect(data["msg"]?.ToString() ?? LocalizationHelper.GetString("GameResourceFailed"));
+                break;
+        }
+
+        return CheckUpdateRetT.UnknownError;
+    }
+
+    /// <summary>
+    /// MirrorChyan 在收到首个请求后会开始打包 OTA，打包过程中返回完整包。
+    /// 等待 10s 后重试，通常此时 OTA 包已就绪；若重试后仍为完整包则走完整包更新途径。
+    /// </summary>
+    private async Task<JObject> TryWaitForMirrorChyanOtaAsync(string url, JObject data)
+    {
+        if (data["data"]?["update_type"]?.ToObject<string>() != "full")
+        {
+            return data;
+        }
+
+        _logger.Information("MirrorChyan returned full package, OTA may be building. Will retry after 10s.");
+        ToastNotification.ShowDirect(LocalizationHelper.GetString("MirrorChyanBuildingOta"));
+        Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("NewVersionIsBeingBuilt"), UiLogColor.Info);
+
+        await Task.Delay(10000);
+
+        // 重试请求，检查 OTA 包是否已就绪
+        var retryData = await FetchMirrorChyanJsonAsync(url);
+        if (retryData != null && retryData["data"]?["update_type"]?.ToObject<string>() != "full")
+        {
+            // 重试成功，OTA 包已就绪，使用新的响应数据
+            _logger.Information("MirrorChyan OTA package ready after retry.");
+            return retryData;
+        }
+
+        // 重试后仍是完整包或重试失败，走完整包更新途径
+        _logger.Warning("MirrorChyan still returning full package after retry (or retry failed).");
+        _requiresFullPackageConfirmation = true;
+        if (SettingsViewModel.VersionUpdateSettings.AutoDownloadUpdatePackage)
+        {
+            ToastNotification.ShowDirect(LocalizationHelper.GetString("NewVersionNoOtaPackage"));
+            Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("NewVersionNoOtaPackage"), UiLogColor.Warning);
+        }
+
+        return data;
     }
 
     private bool NeedToUpdate(string latestVersion)
@@ -1131,10 +1448,13 @@ public class VersionUpdateDialogViewModel : Screen
     {
         try
         {
-            return await Instances.HttpService.DownloadFileAsync(
-                    new(url),
-                    assetsObject["name"]!.ToString(),
-                    assetsObject["content_type"]?.ToString())
+            var uri = new Uri(url);
+            return await DownloadUpdatePackageWithRetryAsync(
+                    () => Instances.HttpService.DownloadFileAsync(
+                        uri,
+                        assetsObject["name"]!.ToString(),
+                        assetsObject["content_type"]?.ToString()),
+                    uri)
                 .ConfigureAwait(false);
         }
         catch (Exception)
@@ -1147,14 +1467,52 @@ public class VersionUpdateDialogViewModel : Screen
     {
         try
         {
-            return await Instances.HttpService.DownloadFileAsync(
-                    new(url), filename)
+            var uri = new Uri(url);
+            return await DownloadUpdatePackageWithRetryAsync(
+                    () => Instances.HttpService.DownloadFileAsync(uri, filename),
+                    uri)
                 .ConfigureAwait(false);
         }
         catch (Exception)
         {
             return false;
         }
+    }
+
+    private static async Task<bool> DownloadUpdatePackageWithRetryAsync(Func<Task<bool>> download, Uri uri)
+    {
+        for (var attempt = 1; attempt <= UpdatePackageDownloadMaxAttempts; attempt++)
+        {
+            if (await download().ConfigureAwait(false))
+            {
+                return true;
+            }
+
+            if (attempt < UpdatePackageDownloadMaxAttempts)
+            {
+                var delay = TimeSpan.FromSeconds(attempt);
+                _logger.Warning(
+                    "Update package download failed for {Uri} (attempt {Attempt}/{MaxAttempts}); retrying in {Delay}",
+                    uri.GetLeftPart(UriPartial.Path),
+                    attempt,
+                    UpdatePackageDownloadMaxAttempts,
+                    delay);
+                OutputDownloadProgress(
+                    LocalizationHelper.GetStringFormat(
+                        "NewVersionDownloadRetrying",
+                        delay.TotalSeconds,
+                        attempt,
+                        UpdatePackageDownloadMaxAttempts),
+                    downloading: false);
+                await Task.Delay(delay).ConfigureAwait(false);
+            }
+        }
+
+        _logger.Error(
+            "Update package download finally failed after reaching maximum attempts for {Uri} (max attempts {MaxAttempts})",
+            uri.GetLeftPart(UriPartial.Path),
+            UpdatePackageDownloadMaxAttempts);
+        return false;
     }
 
     public static void OutputDownloadProgress(long value = 0, long maximum = 1, int len = 0, double ts = 1, string? toolTip = null)

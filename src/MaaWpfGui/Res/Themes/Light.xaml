@@ -2,6 +2,7 @@
 
     <!--  Custom Brush  -->
     <SolidColorBrush x:Key="PallasBrush" Color="#6969AA" />
+    <SolidColorBrush x:Key="SettingsSearchHighlightBrush" Color="#80FFD54F" />
 
     <!--  HandyControl Brush  -->
     <!--  文字颜色  -->
@@ -44,13 +45,13 @@
         <GradientStop Offset="1" Color="#EC407A" />
     </LinearGradientBrush>
 
+    <SolidColorBrush x:Key="HyperlinkBrush" Color="#326cf3" />
+    <SolidColorBrush x:Key="HyperlinkHoverBrush" Color="#ff0000" />
+
     <!--  MdXaml Brush  -->
     <SolidColorBrush x:Key="MdXamlBackground" Color="#ffffff" />
     <SolidColorBrush x:Key="MdXamlCodeBackground" Color="#f6f8fa" />
     <SolidColorBrush x:Key="MdXamlForeground" Color="#212121" />
-    <SolidColorBrush x:Key="MdXamlHyperlink" Color="#326cf3" />
-    <SolidColorBrush x:Key="MdXamlHyperlinkClicked" Color="#ff0000" />
-
 
     <!--  UiLogColor  -->
     <SolidColorBrush x:Key="SuccessLogBrush" Color="Green" />
@@ -65,6 +66,8 @@
     <SolidColorBrush x:Key="TaskQueue.TaskItemStatus.InProgress" Color="#206C9CF3" />
     <SolidColorBrush x:Key="TaskQueue.TaskItemStatus.Completed" Color="#2060D060" />
     <SolidColorBrush x:Key="TaskQueue.TaskItemStatus.Error" Color="#20FF6666" />
+
+    <SolidColorBrush x:Key="Copilot.RaidBrush" Color="#33FF0000" />
 
     <SolidColorBrush x:Key="Star1OperatorLogBrush" Color="Black" />
     <SolidColorBrush x:Key="Star1OperatorLogBrushPotentialFull" Color="#66000000" />

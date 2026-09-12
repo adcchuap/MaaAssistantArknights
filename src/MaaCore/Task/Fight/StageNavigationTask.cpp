@@ -7,6 +7,7 @@
 #include "Config/TaskData.h"
 #include "Controller/Controller.h"
 #include "Task/ProcessTask.h"
+#include "Task/StageNavigationHelper.h"
 #include "Utils/Logger.hpp"
 #include "Vision/OCRer.h"
 
@@ -100,14 +101,14 @@ bool asst::StageNavigationTask::set_stage_name(const std::string& stage_name)
                 return false;
             }
             static const std::string difficulty_task_prefix = "ChapterDifficulty";
-            m_difficulty_task = difficulty_task_prefix + upper_difficulty;
+            m_difficulty_tasks = { difficulty_task_prefix + upper_difficulty };
         }
         else if (mode == ChapterDifficultyMode::PostStageNormalHard) {
             if (upper_difficulty == "Hard") {
-                m_difficulty_task = "ChangeToRaidDifficulty";
+                m_difficulty_tasks = { "ChangeToRaidDifficulty", "RaidConfirm" };
             }
             else if (upper_difficulty == "Normal") {
-                m_difficulty_task = "ChangeToNormalDifficulty";
+                m_difficulty_tasks = { "ChangeToNormalDifficulty", "NormalConfirm" };
             }
             else {
                 Log.error("only Normal/Hard is supported for chapter 15+", upper_difficulty);
@@ -119,10 +120,12 @@ bool asst::StageNavigationTask::set_stage_name(const std::string& stage_name)
             return false;
         }
 
-        Log.info("difficulty task", m_difficulty_task);
-        if (!Task.get(m_difficulty_task)) {
-            Log.error("difficulty task not exists", m_difficulty_task);
-            return false;
+        for (const auto& difficulty_task : m_difficulty_tasks) {
+            Log.info("difficulty task", difficulty_task);
+            if (!Task.get(difficulty_task)) {
+                Log.error("difficulty task not exists", difficulty_task);
+                return false;
+            }
         }
     }
 
@@ -164,7 +167,7 @@ void asst::StageNavigationTask::clear() noexcept
     m_is_directly = false;
     m_directly_task.clear();
     m_chapter_task.clear();
-    m_difficulty_task.clear();
+    m_difficulty_tasks.clear();
     m_stage_code.clear();
     m_switch_difficulty_after_stage_selection = false;
 }
@@ -177,8 +180,8 @@ bool asst::StageNavigationTask::chapter_wayfinding()
         return false;
     }
 
-    if (!m_difficulty_task.empty() && !m_switch_difficulty_after_stage_selection) {
-        return ProcessTask(*this, { m_difficulty_task }).set_retry_times(RetryTimesDefault).run();
+    if (!m_difficulty_tasks.empty() && !m_switch_difficulty_after_stage_selection) {
+        return ProcessTask(*this, m_difficulty_tasks).set_retry_times(RetryTimesDefault).run();
     }
 
     return true;
@@ -188,6 +191,18 @@ bool asst::StageNavigationTask::swipe_and_find_stage()
 {
     LogTraceFunction;
 
+    // 优先检查是否存在对应活动关卡名的模板资源，如果存在则走模板匹配
+    std::string templ_path = StageNavigationHelper::get_stage_template_path(m_stage_code);
+    if (!templ_path.empty()) {
+        Log.info("Stage template found, using template matching for", m_stage_code, ", templ:", templ_path);
+        Task.get<MatchTaskInfo>(m_stage_code + "@ClickStageByTemplate")->templ_names = { templ_path + ".png" };
+        Task.get<OcrTaskInfo>(m_stage_code + "@ClickedCorrectStageByTemplateOrSwipe")->text = { m_stage_code };
+        return ProcessTask(*this, { m_stage_code + "@StageNavigationByTemplateMatchBegin" })
+            .set_retry_times(RetryTimesDefault)
+            .run();
+    }
+
+    // 无模板，使用 OCR 匹配
     Task.get<OcrTaskInfo>(m_stage_code + "@ClickStageName")->text = { m_stage_code };
     std::string replace_m_stage_code = m_stage_code;
     utils::string_replace_all_in_place(replace_m_stage_code, { { "-", "" } });
@@ -202,9 +217,9 @@ bool asst::StageNavigationTask::switch_difficulty_after_stage_selection()
 {
     LogTraceFunction;
 
-    if (m_difficulty_task.empty() || !m_switch_difficulty_after_stage_selection) {
+    if (m_difficulty_tasks.empty() || !m_switch_difficulty_after_stage_selection) {
         return true;
     }
 
-    return ProcessTask(*this, { m_difficulty_task }).set_retry_times(RetryTimesDefault).run();
+    return ProcessTask(*this, m_difficulty_tasks).set_retry_times(RetryTimesDefault).run();
 }

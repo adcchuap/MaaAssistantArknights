@@ -11,7 +11,9 @@ icon: material-symbols:view-quilt-rounded
 請注意，json 檔案不支援註解。文件中的註解僅供說明參考，請勿直接複製使用。
 :::
 
-[視覺化排班產生工具](https://ark.yituliu.cn/tools/schedule)
+[視覺化排班產生工具](https://ark.yituliu.cn/tools/scheduleV3)
+
+[自動產生基建排班表工具](https://riic.autos/)
 
 ## 完整欄位一覽
 
@@ -137,6 +139,6 @@ icon: material-symbols:view-quilt-rounded
 
 ## 範例檔案
 
-[243 極限效率，一天三換](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/243_layout_3_times_a_day.json)
+[243 極限效率，一天三換](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/243_layout_3_times_a_day.json)
 
-[153 極限效率，一天三換](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/153_layout_3_times_a_day.json)
+[153 極限效率，一天三換](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/153_layout_3_times_a_day.json)

@@ -19,7 +19,9 @@ MAA WPF GUI 当前可以通过 Wine 运行。MAA 已采用自包含部署方式�
 
 #### 安装步骤
 
-1. 安装 Visual C++ Redistributable：
+:::: steps
+
+1. 安装 Visual C++ Redistributable
 
    下载并安装 [Visual C++ 可再发行程序包](https://aka.ms/vc14/vc_redist.x64.exe)：
 
@@ -31,7 +33,11 @@ MAA WPF GUI 当前可以通过 Wine 运行。MAA 已采用自包含部署方式�
    `DependencySetup_依赖库安装.bat` 基于 winget 和 Windows 提权机制，通常无法在 Wine 中正常工作，因此需要手动安装运行库。
    :::
 
-2. 下载 Windows 版 MAA，解压后运行 `wine MAA.exe`。
+2. 下载 MAA
+
+   下载 Windows 版 MAA，解压后运行 `wine MAA.exe`。
+
+::::
 
 ::: info 注意
 需要在连接设置中将 ADB 路径设置为 [Windows 版 `adb.exe`](https://dl.google.com/android/repository/platform-tools-latest-windows.zip)。
@@ -41,7 +47,7 @@ MAA WPF GUI 当前可以通过 Wine 运行。MAA 已采用自包含部署方式�
 
 #### 使用 Linux 原生 MaaCore（实验性功能）
 
-下载 [MAA Wine Bridge](https://github.com/MaaAssistantArknights/MaaAssistantArknights/tree/dev/src/MaaWineBridge) 源码并构建，用生成的 `MaaCore.dll`（ELF 文件）替换 Windows 版本，并将 Linux 原生动态库（`libMaaCore.so` 以及依赖）放在同一目录下。
+下载 [MAA Wine Bridge](https://github.com/MaaAssistantArknights/MaaAssistantArknights/tree/dev-v2/src/MaaWineBridge) 源码并构建，用生成的 `MaaCore.dll`（ELF 文件）替换 Windows 版本，并将 Linux 原生动态库（`libMaaCore.so` 以及依赖）放在同一目录下。
 
 此时通过 Wine 运行 `MAA.exe`，将会加载 Linux 原生动态库。
 
@@ -72,7 +78,7 @@ MAA WPF GUI 当前可以通过 Wine 运行。MAA 已采用自包含部署方式�
    1. 在 [MAA 官网](https://maa.plus/) 下载 Linux 动态库并解压，或从软件源安装：
       - AUR：[maa-assistant-arknights](https://aur.archlinux.org/packages/maa-assistant-arknights)，按照安装后的提示编辑文件
       - Nixpkgs: [maa-assistant-arknights](https://github.com/NixOS/nixpkgs/blob/nixos-unstable/pkgs/by-name/ma/maa-assistant-arknights/package.nix)
-   2. 进入 `./MAA-v{版本号}-linux-{架构}/Python/` 目录下打开 `sample.py` 文件
+   2. 进入解压后的 `Python/` 目录下打开 `sample.py` 文件
 
    ::: tip
    预编译的版本包含在相对较新的 Linux 发行版 (Ubuntu 22.04) 中编译的动态库，如果您系统中的 libstdc++ 版本较老，可能遇到 ABI 不兼容的问题
@@ -80,7 +86,7 @@ MAA WPF GUI 当前可以通过 Wine 运行。MAA 已采用自包含部署方式�
    :::
 
 2. ADB 配置
-   1. 找到 [`if asst.connect('adb.exe', '127.0.0.1:5554'):`](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/b4fc3528decd6777441a8aca684c22d35d2b2574/src/Python/sample.py#L62) 一栏
+   1. 找到 [`if asst.connect("adb.exe", "127.0.0.1:5555"):`](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/dev-v2/src/Python/sample.py#L71) 一栏
    2. ADB 工具调用
       - 如果模拟器使用 `Android Studio` 的 `avd` ，其自带 ADB 。可以直接在 `adb.exe` 一栏填写 ADB 路径，一般在 `$HOME/Android/Sdk/platform-tools/` 里面可以找到，例如：
 
@@ -109,7 +115,7 @@ MAA WPF GUI 当前可以通过 Wine 运行。MAA 已采用自包含部署方式�
 
 3. 任务配置
 
-自定义任务： 根据需要参考 [集成文档](../../protocol/integration.md) 对 `sample.py` 的 [`# 任务及参数请参考 docs/integration.md`](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/722f0ddd4765715199a5dc90ea1bec2940322344/src/Python/sample.py#L54) 一栏进行修改
+   自定义任务： 根据需要参考 [集成文档](../../protocol/integration.md) 对 `sample.py` 的 [`# 任务及参数请参考 docs/zh-cn/protocol/integration.md`](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/dev-v2/src/Python/sample.py#L77) 一栏进行修改
 
 ::::
 

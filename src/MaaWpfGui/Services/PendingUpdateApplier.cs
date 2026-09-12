@@ -21,8 +21,9 @@ using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
-using MaaWpfGui.Constants;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Helper;
+using MaaWpfGui.Main;
 using Newtonsoft.Json.Linq;
 using Semver;
 using Serilog;
@@ -51,12 +52,19 @@ internal static partial class PendingUpdateApplier
     private static readonly HashSet<string> s_fullPackagePreservedEntries = new(StringComparer.OrdinalIgnoreCase)
     {
         "achievement",
-        "background",
         "cache",
         "config",
         "data",
         "debug",
         "MAA.Updater.exe",
+    };
+
+    // 完整包清理时的嵌套保留目录（相对安装根目录，反斜杠分隔）：
+    // 用于随包发布、同时允许用户存放自有文件的目录（如壁纸目录 Res\Backgrounds\Wallpapers），
+    // 不随完整包更新清理，其上级目录（如 Res）下的其他内容仍正常清理
+    private static readonly HashSet<string> s_fullPackagePreservedNestedEntries = new(StringComparer.OrdinalIgnoreCase)
+    {
+        @"Res\Backgrounds\Wallpapers",
     };
 
     private static string DelegatedUpdateSuccessStatusFilePath => Path.Combine(PathsHelper.BaseDir, "pending-update-success.txt");
@@ -86,67 +94,93 @@ internal static partial class PendingUpdateApplier
         string? SourceVersion = null,
         string? TargetVersion = null);
 
-    public enum FullPackageInspectionStatus
+    public enum PackageInspectionStatus
     {
+        /// <summary>文件不存在。</summary>
         MissingFile,
+
+        /// <summary>文件名不匹配任何已知更新包模式（完整包 / OTA 包）。</summary>
         NotMatched,
-        Rejected,
-        Supported,
+
+        /// <summary>完整包：架构或版本升级方向不符合要求。</summary>
+        FullRejected,
+
+        /// <summary>完整包：架构、版本方向均符合要求。</summary>
+        FullSupported,
+
+        /// <summary>OTA 包：架构、源版本或版本升级方向不符合要求。</summary>
+        OtaRejected,
+
+        /// <summary>OTA 包：架构、源版本、版本方向均符合要求。</summary>
+        OtaSupported,
     }
 
-    public sealed record FullPackageInspectionResult(
-        FullPackageInspectionStatus Status,
+    public sealed record PackageInspectionResult(
+        PackageInspectionStatus Status,
+        string? SourceVersion = null,
         string? TargetVersion = null)
     {
-        public bool IsSupported => Status == FullPackageInspectionStatus.Supported;
+        public bool IsSupported =>
+            Status is PackageInspectionStatus.FullSupported or PackageInspectionStatus.OtaSupported;
 
+        /// <summary>是否匹配了任意一种版本更新包文件名模式（完整包或 OTA 包）。</summary>
         public bool MatchedPattern =>
-            Status == FullPackageInspectionStatus.Rejected || Status == FullPackageInspectionStatus.Supported;
+            Status is not (PackageInspectionStatus.MissingFile or PackageInspectionStatus.NotMatched);
     }
 
     public static bool HasPendingUpdatePackage()
     {
-        string updateTag = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionName, string.Empty);
-        string updatePackageName = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionUpdatePackage, string.Empty);
+        string updateTag = ConfigFactory.Root.Update.Name;
+        string updatePackageName = ConfigFactory.Root.Update.UpdatePackage;
         return updateTag != string.Empty && updatePackageName != string.Empty && File.Exists(updatePackageName);
-    }
-
-    public static LocalPackageImportResult TryRegisterLocalPackage(string packagePath, string currentVersion, string architecture)
-    {
-        return TryRegisterLocalPackage(packagePath, currentVersion, architecture, null);
     }
 
     public static LocalPackageImportResult TryRegisterLocalPackage(
         string packagePath,
         string currentVersion,
         string architecture,
-        FullPackageInspectionResult? fullPackageInspection)
+        PackageInspectionResult? inspection,
+        bool allowSameVersion = false)
     {
-        FullPackageInspectionResult inspection = fullPackageInspection ?? InspectSupportedLocalFullPackage(packagePath, currentVersion, architecture);
-        if (inspection.Status == FullPackageInspectionStatus.MissingFile)
-        {
-            _logger.Warning("Dropped update package does not exist: {PackagePath}", packagePath);
-            return new(LocalPackageImportStatus.Unsupported);
-        }
+        inspection ??= InspectLocalUpdatePackage(packagePath, currentVersion, architecture, allowSameVersion);
 
-        if (inspection.IsSupported)
+        switch (inspection.Status)
         {
-            return RegisterSupportedLocalFullPackage(packagePath, inspection.TargetVersion);
-        }
+            case PackageInspectionStatus.MissingFile:
+                _logger.Warning("Dropped update package does not exist: {PackagePath}", packagePath);
+                return new(LocalPackageImportStatus.Unsupported);
 
-        if (inspection.MatchedPattern)
-        {
-            return new(LocalPackageImportStatus.Unsupported, null, inspection.TargetVersion);
-        }
+            case PackageInspectionStatus.FullSupported:
+                return RegisterSupportedLocalFullPackage(packagePath, inspection.TargetVersion);
 
-        return TryRegisterNonFullLocalPackage(packagePath, currentVersion, architecture);
+            case PackageInspectionStatus.OtaSupported:
+                return RegisterSupportedLocalOtaPackage(packagePath, inspection.SourceVersion, inspection.TargetVersion);
+
+            // FullRejected / OtaRejected / NotMatched
+            default:
+                _logger.Warning(
+                    "Dropped package rejected or unrecognized: status={Status}, sourceVersion={SourceVersion}, targetVersion={TargetVersion}",
+                    inspection.Status,
+                    inspection.SourceVersion,
+                    inspection.TargetVersion);
+                return new(LocalPackageImportStatus.Unsupported, inspection.SourceVersion, inspection.TargetVersion);
+        }
     }
 
-    public static FullPackageInspectionResult InspectSupportedLocalFullPackage(string packagePath, string currentVersion, string architecture)
+    /// <summary>
+    /// 通过文件名检测拖入的压缩包是完整更新包还是 OTA 更新包，并校验架构与版本方向。
+    /// 两种正则都不匹配时返回 <see cref="PackageInspectionStatus.NotMatched"/>（可能是资源包或无关文件）。
+    /// </summary>
+    /// <param name="packagePath">拖入的压缩包路径。</param>
+    /// <param name="currentVersion">当前 MAA 版本号（如 v5.10.0）。</param>
+    /// <param name="architecture">当前系统架构（如 x64、arm64）。</param>
+    /// <param name="allowSameVersion">允许目标版本与当前版本相同（用于文件完整性修复的重装场景）。</param>
+    /// <returns>检测结果，包含状态、源版本（OTA）、目标版本。</returns>
+    public static PackageInspectionResult InspectLocalUpdatePackage(string packagePath, string currentVersion, string architecture, bool allowSameVersion = false)
     {
         if (!File.Exists(packagePath))
         {
-            return new(FullPackageInspectionStatus.MissingFile);
+            return new(PackageInspectionStatus.MissingFile);
         }
 
         string fullPackagePath = Path.GetFullPath(packagePath);
@@ -158,51 +192,34 @@ internal static partial class PendingUpdateApplier
             currentVersion,
             normalizedArchitecture);
 
+        // ① 完整包：MAA-vX.X.X-win-x64.zip
         Match fullPackageMatch = FullPackageNameRegex().Match(fileName);
-        if (!fullPackageMatch.Success)
+        if (fullPackageMatch.Success)
         {
-            return new(FullPackageInspectionStatus.NotMatched);
+            string targetVersion = fullPackageMatch.Groups["version"].Value;
+            string packageArchitecture = fullPackageMatch.Groups["arch"].Value;
+            bool architectureMatched = string.Equals(normalizedArchitecture, packageArchitecture, StringComparison.OrdinalIgnoreCase);
+            bool isUpgradeTarget = IsUpgradeTarget(currentVersion, targetVersion)
+                || (allowSameVersion && VersionsMatch(currentVersion, targetVersion));
+
+            _logger.Information(
+                "Dropped package matched full package pattern: targetVersion={TargetVersion}, packageArchitecture={PackageArchitecture}",
+                targetVersion,
+                packageArchitecture);
+
+            if (!architectureMatched || !isUpgradeTarget)
+            {
+                _logger.Warning(
+                    "Dropped full package rejected: architectureMatched={ArchitectureMatched}, isUpgradeTarget={IsUpgradeTarget}",
+                    architectureMatched,
+                    isUpgradeTarget);
+                return new(PackageInspectionStatus.FullRejected, TargetVersion: targetVersion);
+            }
+
+            return new(PackageInspectionStatus.FullSupported, TargetVersion: targetVersion);
         }
 
-        string targetVersion = fullPackageMatch.Groups["version"].Value;
-        string packageArchitecture = fullPackageMatch.Groups["arch"].Value;
-        bool architectureMatched = string.Equals(normalizedArchitecture, packageArchitecture, StringComparison.OrdinalIgnoreCase);
-        bool isUpgradeTarget = IsUpgradeTarget(currentVersion, targetVersion);
-
-        _logger.Information(
-            "Dropped package matched full package pattern: targetVersion={TargetVersion}, packageArchitecture={PackageArchitecture}",
-            targetVersion,
-            packageArchitecture);
-
-        if (!architectureMatched || !isUpgradeTarget)
-        {
-            _logger.Warning(
-                "Dropped full package rejected: architectureMatched={ArchitectureMatched}, isUpgradeTarget={IsUpgradeTarget}",
-                architectureMatched,
-                isUpgradeTarget);
-            return new(FullPackageInspectionStatus.Rejected, targetVersion);
-        }
-
-        return new(FullPackageInspectionStatus.Supported, targetVersion);
-    }
-
-    private static LocalPackageImportResult RegisterSupportedLocalFullPackage(string packagePath, string? targetVersion)
-    {
-        string fullPackagePath = Path.GetFullPath(packagePath);
-        RegisterPendingUpdatePackage(targetVersion ?? string.Empty, fullPackagePath);
-        _logger.Information(
-            "Dropped full package registered successfully: packagePath={PackagePath}, targetVersion={TargetVersion}",
-            fullPackagePath,
-            targetVersion);
-        return new(LocalPackageImportStatus.FullPackageRegistered, null, targetVersion);
-    }
-
-    private static LocalPackageImportResult TryRegisterNonFullLocalPackage(string packagePath, string currentVersion, string architecture)
-    {
-        string fullPackagePath = Path.GetFullPath(packagePath);
-        string fileName = Path.GetFileName(fullPackagePath);
-        string normalizedArchitecture = NormalizeArchitecture(architecture);
-
+        // ② OTA 包：MAAComponent-OTA-vFROM_vTO-win-x64.zip
         Match otaMatch = OtaPackageNameRegex().Match(fileName);
         if (otaMatch.Success)
         {
@@ -227,25 +244,43 @@ internal static partial class PendingUpdateApplier
                     architectureMatched,
                     sourceVersionMatched,
                     isUpgradeTarget);
-                return new(LocalPackageImportStatus.Unsupported, sourceVersion, targetVersion);
+                return new(PackageInspectionStatus.OtaRejected, sourceVersion, targetVersion);
             }
 
-            RegisterPendingUpdatePackage(targetVersion, fullPackagePath);
-            _logger.Information(
-                "Dropped OTA package registered successfully: packagePath={PackagePath}, targetVersion={TargetVersion}",
-                fullPackagePath,
-                targetVersion);
-            return new(LocalPackageImportStatus.OtaPackageRegistered, sourceVersion, targetVersion);
+            return new(PackageInspectionStatus.OtaSupported, sourceVersion, targetVersion);
         }
 
-        _logger.Warning("Dropped package did not match any supported update package pattern: {PackageName}", fileName);
-        return new(LocalPackageImportStatus.Unsupported);
+        // ③ 都不匹配（资源包或无关文件），交给调用方决定后续处理
+        return new(PackageInspectionStatus.NotMatched);
+    }
+
+    private static LocalPackageImportResult RegisterSupportedLocalFullPackage(string packagePath, string? targetVersion)
+    {
+        string fullPackagePath = Path.GetFullPath(packagePath);
+        RegisterPendingUpdatePackage(targetVersion ?? string.Empty, fullPackagePath);
+        _logger.Information(
+            "Dropped full package registered successfully: packagePath={PackagePath}, targetVersion={TargetVersion}",
+            fullPackagePath,
+            targetVersion);
+        return new(LocalPackageImportStatus.FullPackageRegistered, null, targetVersion);
+    }
+
+    private static LocalPackageImportResult RegisterSupportedLocalOtaPackage(string packagePath, string? sourceVersion, string? targetVersion)
+    {
+        string fullPackagePath = Path.GetFullPath(packagePath);
+        RegisterPendingUpdatePackage(targetVersion ?? string.Empty, fullPackagePath);
+        _logger.Information(
+            "Dropped OTA package registered successfully: packagePath={PackagePath}, sourceVersion={SourceVersion}, targetVersion={TargetVersion}",
+            fullPackagePath,
+            sourceVersion,
+            targetVersion);
+        return new(LocalPackageImportStatus.OtaPackageRegistered, sourceVersion, targetVersion);
     }
 
     public static PendingUpdateApplyResult TryApplyPendingUpdatePackage()
     {
-        string updateTag = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionName, string.Empty);
-        string updatePackageName = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionUpdatePackage, string.Empty);
+        string updateTag = ConfigFactory.Root.Update.Name;
+        string updatePackageName = ConfigFactory.Root.Update.UpdatePackage;
         if (updateTag == string.Empty || updatePackageName == string.Empty || !File.Exists(updatePackageName))
         {
             return new(PendingUpdateApplyResult.StatusKind.NoPendingPackage);
@@ -351,7 +386,14 @@ internal static partial class PendingUpdateApplier
         }
     }
 
-    public static bool TryConsumeDelegatedUpdateFailure(out string? failureReason)
+    /// <summary>
+    /// 读取外部更新器写入的失败状态。标志文件只读不删：须跨启动持久保留
+    /// （避免用户忽略提示后重启导致半更新状态无人提醒），直至完整包安装时随根目录清场移除。
+    /// 读取同时会清空待应用更新包配置（沿用旧消费语义：失败后不再自动重试该包）。
+    /// </summary>
+    /// <param name="failureReason">更新器写入的 UTF-8 失败原因，读取失败时为 <c>null</c>。</param>
+    /// <returns>失败标志文件存在（上次更新失败）时为 <c>true</c>。</returns>
+    public static bool TryReadDelegatedUpdateFailure(out string? failureReason)
     {
         failureReason = null;
         if (!File.Exists(DelegatedUpdateFailureStatusFilePath))
@@ -362,18 +404,67 @@ internal static partial class PendingUpdateApplier
         try
         {
             failureReason = File.ReadAllText(DelegatedUpdateFailureStatusFilePath).Trim();
-            return true;
         }
         catch (Exception ex)
         {
             _logger.Warning(ex, "Failed to read delegated update failure state: {FailureStateFilePath}", DelegatedUpdateFailureStatusFilePath);
-            return true;
         }
-        finally
+
+        ClearPendingUpdatePackageState();
+        return true;
+    }
+
+    /// <summary>
+    /// 写入更新失败状态文件，格式与外部更新器写入的一致（UTF-8 纯文本原因），
+    /// 供进程内应用失败（RequiresManualRecovery）等场景持久化失败状态。
+    /// </summary>
+    public static void MarkDelegatedUpdateFailure(string failureReason)
+    {
+        try
         {
-            ClearPendingUpdatePackageState();
-            SafeDeleteFile(DelegatedUpdateFailureStatusFilePath);
+            File.WriteAllText(DelegatedUpdateFailureStatusFilePath, failureReason, Encoding.UTF8);
         }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to write delegated update failure state: {FailureStateFilePath}", DelegatedUpdateFailureStatusFilePath);
+        }
+    }
+
+    /// <summary>
+    /// 将更新器写入的英文失败原因映射为本地化的展示文案。
+    /// </summary>
+    /// <param name="failureReason">更新器写入的失败原因。</param>
+    /// <returns>可直接展示给用户的文案；双语 reason（多实例互斥等）原样返回。</returns>
+    public static string GetDelegatedUpdateFailureDescription(string? failureReason)
+    {
+        if (string.IsNullOrWhiteSpace(failureReason))
+        {
+            return LocalizationHelper.GetString("DelegatedUpdateFailureReasonUnknown");
+        }
+
+        // 文件搬移类失败：多为文件占用（安全软件扫描新解压的文件、其他程序锁定）
+        if (failureReason.Contains("Failed to move to backup:", StringComparison.Ordinal) ||
+            failureReason.Contains("Failed to back up existing entry:", StringComparison.Ordinal) ||
+            failureReason.Contains("Failed to move file into place:", StringComparison.Ordinal))
+        {
+            return LocalizationHelper.GetString("DelegatedUpdateFailureReasonFileLocked");
+        }
+
+        // 计划文件/路径类失败：更新包或其解压产物异常
+        if (failureReason.Contains("Plan file", StringComparison.Ordinal) ||
+            failureReason.Contains("Failed to open file:", StringComparison.Ordinal) ||
+            failureReason.Contains("Failed to read file:", StringComparison.Ordinal) ||
+            failureReason.Contains("Illegal path", StringComparison.Ordinal) ||
+            failureReason.Contains("Non-full package", StringComparison.Ordinal))
+        {
+            return LocalizationHelper.GetString("DelegatedUpdateFailureReasonPackageError");
+        }
+
+        // 更新器对用户可干预的场景（多实例互斥等）写入的是中英双语文案，含非 ASCII 字符，直接展示；
+        // 其余未匹配的纯英文技术串不直接进弹窗，引导用户看日志
+        return failureReason.Any(c => c > 0x7f)
+            ? failureReason
+            : LocalizationHelper.GetString("DelegatedUpdateFailureReasonUnknown");
     }
 
     public static bool TryConsumeDelegatedUpdateSuccess()
@@ -443,15 +534,17 @@ internal static partial class PendingUpdateApplier
         IReadOnlyList<string> removeEntries,
         IReadOnlyList<string> moveEntries)
     {
-        bool showUpdaterConsole = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.ShowUpdaterConsole, false);
+        bool showUpdaterConsole = ConfigFactory.Root.Update.ShowUpdaterConsole;
+        bool showUpdaterProgress = ConfigFactory.Root.Update.ShowUpdaterProgress;
         string planPath = Path.Combine(context.RootDir, $"maa-pending-update-{Guid.NewGuid():N}.json");
         string updaterExecutablePath = PrepareDelegatedUpdaterExecutable(context);
         string relaunchExecutablePath = Path.Combine(context.RootDir, "MAA.exe");
 
-        File.WriteAllText(planPath, CreatePendingUpdatePlan(packageType, removeEntries, moveEntries));
+        // 将当前进程需要转发的启动参数写入 plan，供 Updater 原样传给下次 MAA.exe
+        string[] relaunchArgs = Bootstrapper.GetForwardableRestartArgs();
+        File.WriteAllText(planPath, CreatePendingUpdatePlan(packageType, removeEntries, moveEntries, relaunchArgs));
 
-        var startInfo = new ProcessStartInfo
-        {
+        var startInfo = new ProcessStartInfo {
             FileName = updaterExecutablePath,
             UseShellExecute = false,
             CreateNoWindow = !showUpdaterConsole,
@@ -460,7 +553,8 @@ internal static partial class PendingUpdateApplier
 
         // Args: <ParentPid> <RootDir> <ExtractDir> <BackupDir>
         //       <PackagePath> <SuccessStatusFile> <FailureStatusFile>
-        //       <RelaunchExecutablePath> <PlanFile> [--show-console]
+        //       <RelaunchExecutablePath> <PlanFile>
+        //       [--mutex-name <name>] [--show-console] [--no-progress-ui]
         startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
         startInfo.ArgumentList.Add(context.RootDir);
         startInfo.ArgumentList.Add(context.ExtractDir);
@@ -470,18 +564,26 @@ internal static partial class PendingUpdateApplier
         startInfo.ArgumentList.Add(DelegatedUpdateFailureStatusFilePath);
         startInfo.ArgumentList.Add(relaunchExecutablePath);
         startInfo.ArgumentList.Add(planPath);
+        startInfo.ArgumentList.Add("--mutex-name");
+        startInfo.ArgumentList.Add(Bootstrapper.MutexName);
         if (showUpdaterConsole)
         {
             startInfo.ArgumentList.Add("--show-console");
         }
 
+        if (!showUpdaterProgress)
+        {
+            startInfo.ArgumentList.Add("--no-progress-ui");
+        }
+
         _logger.Information(
-            "Delegating pending update apply to external updater: packageType={PackageType}, rootDir={RootDir}, extractDir={ExtractDir}, packagePath={PackagePath}, showUpdaterConsole={ShowUpdaterConsole}",
+            "Delegating pending update apply to external updater: packageType={PackageType}, rootDir={RootDir}, extractDir={ExtractDir}, packagePath={PackagePath}, showUpdaterConsole={ShowUpdaterConsole}, showUpdaterProgress={ShowUpdaterProgress}",
             packageType,
             context.RootDir,
             context.ExtractDir,
             context.PackagePath,
-            showUpdaterConsole);
+            showUpdaterConsole,
+            showUpdaterProgress);
 
         if (!File.Exists(updaterExecutablePath))
         {
@@ -502,40 +604,129 @@ internal static partial class PendingUpdateApplier
         return string.Equals(Path.GetFileName(ex.FileName), "MAA.Updater.exe", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string CreatePendingUpdatePlan(string packageType, IReadOnlyList<string> removeEntries, IReadOnlyList<string> moveEntries)
+    private static string CreatePendingUpdatePlan(
+        string packageType,
+        IReadOnlyList<string> removeEntries,
+        IReadOnlyList<string> moveEntries,
+        IReadOnlyList<string>? relaunchArgs = null)
     {
-        return new JObject
-        {
+        var plan = new JObject {
             ["packageType"] = packageType,
             ["removeList"] = JArray.FromObject(removeEntries),
             ["moveList"] = JArray.FromObject(moveEntries),
-        }.ToString();
+        };
+
+        // relaunchArgs：Updater 成功后传给 MAA.exe 的启动参数（如 --skip-startup-auto-run）
+        if (relaunchArgs is { Count: > 0 })
+        {
+            plan["relaunchArgs"] = JArray.FromObject(relaunchArgs);
+        }
+
+        return plan.ToString();
     }
 
     private static string[] GetFullPackageRemoveEntries(PendingUpdateContext context)
     {
         HashSet<string> preservedEntries = CreateFullPackagePreservedEntries(context);
-        return [.. Directory.GetFileSystemEntries(context.RootDir)
-            .Select(Path.GetFileName)
-            .OfType<string>()
-            .Where(entry => !string.IsNullOrWhiteSpace(entry) && !preservedEntries.Contains(entry))
+
+        // 旧安装侧：嵌套保留目录连同内容整体跳过，不进入 .old
+        return [.. ExpandFullPackageEntries(context.RootDir, string.Empty, preservedEntries, includePreserved: false)
             .Distinct(StringComparer.OrdinalIgnoreCase)];
     }
 
     private static string[] GetFullPackageMoveEntries(string extractDir)
     {
-        return [.. GetTopLevelExtractEntries(extractDir)
-            .Where(entry => !IsFullPackagePreservedEntry(entry))
+        // 新包侧：嵌套保留目录只下钻输出其中的文件条目（逐文件覆盖、新增），不整体替换该目录
+        return [.. ExpandFullPackageEntries(extractDir, string.Empty, s_fullPackagePreservedEntries, includePreserved: true)
+            .Where(entry => !IsControlFile(entry))
             .Distinct(StringComparer.OrdinalIgnoreCase)];
     }
 
-    private static string[] GetTopLevelExtractEntries(string extractDir)
+    /// <summary>
+    /// 枚举完整包应用计划中的条目（相对根目录路径）。
+    /// 顶层保留条目（config、cache 等）整体跳过；
+    /// 包含嵌套保留目录的路径不整体输出，下钻拆分，保证保留目录之外的兄弟内容正常清理/写入。
+    /// </summary>
+    /// <param name="dir">待枚举目录（旧安装根目录或新包解压目录）。</param>
+    /// <param name="relativePrefix">当前目录相对根目录的前缀路径，根目录传空串。</param>
+    /// <param name="preservedTopLevel">顶层保留条目名集合。</param>
+    /// <param name="includePreserved">是否输出嵌套保留目录内部的文件条目（新包侧传 true）。</param>
+    /// <param name="insidePreserved">当前是否已处于嵌套保留目录内部。</param>
+    /// <returns>相对根目录的条目路径（反斜杠分隔）。</returns>
+    private static IEnumerable<string> ExpandFullPackageEntries(
+        string dir,
+        string relativePrefix,
+        HashSet<string> preservedTopLevel,
+        bool includePreserved,
+        bool insidePreserved = false)
     {
-        return [.. Directory.GetFileSystemEntries(extractDir)
-            .Select(entry => Path.GetRelativePath(extractDir, entry))
-            .Select(entry => entry.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar))
-            .Where(entry => !string.IsNullOrWhiteSpace(entry) && !IsControlFile(entry))
-            .Distinct(StringComparer.OrdinalIgnoreCase)];
+        bool topLevel = relativePrefix.Length == 0;
+        foreach (string entryPath in Directory.EnumerateFileSystemEntries(dir))
+        {
+            string name = Path.GetFileName(entryPath);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            string relativePath = topLevel ? name : relativePrefix + Path.DirectorySeparatorChar + name;
+
+            if (topLevel && preservedTopLevel.Contains(name))
+            {
+                continue;
+            }
+
+            bool isDirectory = Directory.Exists(entryPath);
+            if (!insidePreserved && isDirectory && s_fullPackagePreservedNestedEntries.Contains(relativePath))
+            {
+                if (includePreserved)
+                {
+                    foreach (string child in ExpandFullPackageEntries(entryPath, relativePath, preservedTopLevel, includePreserved, insidePreserved: true))
+                    {
+                        yield return child;
+                    }
+                }
+
+                continue;
+            }
+
+            if (insidePreserved)
+            {
+                // 保留目录内部只输出文件，目录继续下钻，避免目录条目触发整体替换
+                if (isDirectory)
+                {
+                    foreach (string child in ExpandFullPackageEntries(entryPath, relativePath, preservedTopLevel, includePreserved, insidePreserved: true))
+                    {
+                        yield return child;
+                    }
+                }
+                else
+                {
+                    yield return relativePath;
+                }
+
+                continue;
+            }
+
+            if (isDirectory && ContainsNestedPreservedEntry(relativePath))
+            {
+                // 目录下存在更深的保留路径，不能整体输出
+                foreach (string child in ExpandFullPackageEntries(entryPath, relativePath, preservedTopLevel, includePreserved))
+                {
+                    yield return child;
+                }
+
+                continue;
+            }
+
+            yield return relativePath;
+        }
+    }
+
+    private static bool ContainsNestedPreservedEntry(string relativePath)
+    {
+        string prefix = relativePath + Path.DirectorySeparatorChar;
+        return s_fullPackagePreservedNestedEntries.Any(entry => entry.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string PrepareDelegatedUpdaterExecutable(PendingUpdateContext context)
@@ -565,16 +756,6 @@ internal static partial class PendingUpdateApplier
         };
 
         return preservedEntries;
-    }
-
-    private static bool IsFullPackagePreservedEntry(string relativePath)
-    {
-        return s_fullPackagePreservedEntries.Contains(NormalizeRelativePath(relativePath));
-    }
-
-    private static string NormalizeRelativePath(string relativePath)
-    {
-        return relativePath.Trim().Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
     }
 
     private static bool ShouldDelegatePendingOtaApply(PendingUpdateManifest manifest, out string reason)
@@ -761,8 +942,8 @@ internal static partial class PendingUpdateApplier
 
     private static void MarkPendingUpdateApplied()
     {
-        ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdatePackage, string.Empty);
-        ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdateIsFirstBoot, bool.TrueString);
+        ConfigFactory.Root.Update.UpdatePackage = string.Empty;
+        ConfigFactory.Root.Update.IsFirstBoot = true;
     }
 
     internal static bool ShouldPreserveExistingUpdateBody(string updateTag)
@@ -772,26 +953,26 @@ internal static partial class PendingUpdateApplier
             return false;
         }
 
-        string existingUpdateTag = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionName, string.Empty);
-        string existingUpdateBody = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.VersionUpdateBody, string.Empty);
+        string existingUpdateTag = ConfigFactory.Root.Update.Name;
+        string existingUpdateBody = MarkdownDataHelper.Get("CHANGELOG");
         return !string.IsNullOrWhiteSpace(existingUpdateBody) && VersionsMatch(existingUpdateTag, updateTag);
     }
 
     private static void RegisterPendingUpdatePackage(string updateTag, string packagePath)
     {
         bool preserveExistingUpdateBody = ShouldPreserveExistingUpdateBody(updateTag);
-        ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionName, updateTag);
+        ConfigFactory.Root.Update.Name = updateTag;
         if (!preserveExistingUpdateBody)
         {
-            ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdateBody, string.Empty);
+            MarkdownDataHelper.Delete("CHANGELOG");
         }
 
-        ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdatePackage, packagePath);
+        ConfigFactory.Root.Update.UpdatePackage = packagePath;
     }
 
     private static void ClearPendingUpdatePackageState()
     {
-        ConfigurationHelper.SetGlobalValue(ConfigurationKeys.VersionUpdatePackage, string.Empty);
+        ConfigFactory.Root.Update.UpdatePackage = string.Empty;
     }
 
     private static string NormalizeArchitecture(string architecture)

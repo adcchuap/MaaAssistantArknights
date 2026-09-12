@@ -4,7 +4,12 @@
 #include <fcntl.h>
 #include <io.h>
 #endif
+#include <array>
+#include <atomic>
 #include <csignal>
+#include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -15,6 +20,7 @@
 #include <streambuf>
 #include <thread>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 
 #include "Common/AsstTypes.h"
@@ -29,6 +35,14 @@
 
 #if defined(__APPLE__) || defined(__linux__)
 #include <unistd.h>
+#endif
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <dlfcn.h>
+#include <unwind.h>
+
+#include "Demangle.hpp"
 #endif
 
 namespace asst
@@ -480,7 +494,7 @@ public:
 
                 s << std::format("[{}][{}][Px{}][Tx{}]", MAA_NS::format_now(), v.str, pid, tid);
             }
-            else if constexpr (std::is_enum_v<T> && enum_could_to_string<T>) {
+            else if constexpr (std::is_enum_v<remove_cvref_t<T>> && enum_could_to_string<remove_cvref_t<T>>) {
                 s << asst::enum_to_string(std::forward<T>(v));
             }
             else if constexpr (has_stream_insertion_operator<Stream, T>) {
@@ -842,7 +856,23 @@ private:
         }
     }
 
-    inline static std::atomic<const char*> g_last_signal_reason { nullptr };
+    inline static std::atomic<int> g_last_signal { 0 };
+
+    static const char* format_signal_reason(int sig) noexcept
+    {
+        switch (sig) {
+        case SIGSEGV:
+            return "SIGSEGV (Segmentation Fault)";
+        case SIGABRT:
+            return "SIGABRT (Abort)";
+        case SIGFPE:
+            return "SIGFPE (Floating Point Error)";
+        case SIGILL:
+            return "SIGILL (Illegal Instruction)";
+        default:
+            return "Unknown Signal";
+        }
+    }
 
     static void write_crash_file(const char* reason, const char* detail = nullptr) noexcept
     {
@@ -876,17 +906,31 @@ private:
 
 #ifdef _WIN32
     // SEH 未处理异常过滤器
-    static LONG WINAPI unhandled_exception_filter([[maybe_unused]] PEXCEPTION_POINTERS pExceptionInfo)
+    // 记录异常信息后返回 EXCEPTION_CONTINUE_SEARCH 交给 WER 按未处理异常处理，以便在配置了
+    // LocalDumps 的环境下落下 MAA.exe.*.dmp（默认路径为 %LocalAppData%\CrashDumps），由 GUI 下次启动时收集。
+    // 注意只读 pExceptionInfo，不要改写 ContextRecord 以免污染 WER 抓取到的调用栈。
+    static LONG WINAPI unhandled_exception_filter(PEXCEPTION_POINTERS pExceptionInfo) noexcept
     {
         try {
+            const auto& er = *pExceptionInfo->ExceptionRecord;
             auto& logger = Logger::get_instance();
             logger.error("=== UNHANDLED EXCEPTION ===");
             logger.error("Version", MAA_VERSION);
             logger.error("Built at", __DATE__, __TIME__);
             logger.error("User Dir", UserDir.get());
+            logger.error("ExceptionCode", std::format("{:#010x}", static_cast<unsigned>(er.ExceptionCode)));
+            logger.error("ExceptionAddress", er.ExceptionAddress);
+            logger.error("ExceptionParameters", er.NumberParameters);
+            if (er.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er.NumberParameters >= 2) {
+                logger.error(
+                    "AccessViolation",
+                    er.ExceptionInformation[0] ? "write" : "read",
+                    "at",
+                    reinterpret_cast<const void*>(er.ExceptionInformation[1]));
+            }
             logger.error("============================");
             logger.flush();
-            write_crash_file("UNHANDLED EXCEPTION");
+            write_crash_file("UNHANDLED EXCEPTION (handed over to WER for dump)");
         }
         catch (...) {
             std::cerr << "=== FATAL ERROR ===" << std::endl;
@@ -895,8 +939,104 @@ private:
             std::cerr << "===================" << std::endl;
         }
 
-        // 返回 EXCEPTION_EXECUTE_HANDLER 让程序正常终止
-        return EXCEPTION_EXECUTE_HANDLER;
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+#endif
+
+#ifdef __ANDROID__
+    static constexpr const char* AndroidCrashLogTag = "MaaCoreCrash";
+
+    struct AndroidBacktraceState
+    {
+        void** current = nullptr;
+        void** end = nullptr;
+    };
+
+    static _Unwind_Reason_Code android_unwind_callback(_Unwind_Context* context, void* arg) noexcept
+    {
+        auto* state = static_cast<AndroidBacktraceState*>(arg);
+        if (state == nullptr || state->current == state->end) {
+            return _URC_END_OF_STACK;
+        }
+
+        const auto pc = reinterpret_cast<void*>(_Unwind_GetIP(context));
+        if (pc == nullptr) {
+            return _URC_NO_REASON;
+        }
+
+        *state->current++ = pc;
+        return _URC_NO_REASON;
+    }
+
+    static std::size_t capture_android_backtrace(void** frames, std::size_t max_frames) noexcept
+    {
+        AndroidBacktraceState state {
+            .current = frames,
+            .end = frames + max_frames,
+        };
+
+        _Unwind_Backtrace(android_unwind_callback, &state);
+        return static_cast<std::size_t>(state.current - frames);
+    }
+
+    static void log_android_crash_signal(const char* signal_reason) noexcept
+    {
+        __android_log_write(ANDROID_LOG_FATAL, AndroidCrashLogTag, "=== FATAL ERROR ===");
+        if (signal_reason != nullptr) {
+            __android_log_print(ANDROID_LOG_FATAL, AndroidCrashLogTag, "Fatal Signal: %s", signal_reason);
+        }
+        __android_log_write(ANDROID_LOG_FATAL, AndroidCrashLogTag, "===================");
+    }
+
+    static void log_android_crash_terminate(const char* exception_info) noexcept
+    {
+        __android_log_write(ANDROID_LOG_FATAL, AndroidCrashLogTag, "=== FATAL ERROR ===");
+        if (exception_info != nullptr) {
+            __android_log_print(ANDROID_LOG_FATAL, AndroidCrashLogTag, "Unhandled exception: %s", exception_info);
+        }
+        __android_log_write(ANDROID_LOG_FATAL, AndroidCrashLogTag, "===================");
+    }
+
+    static void dump_android_stacktrace(Logger& logger) noexcept
+    {
+        std::array<void*, 32> frames {};
+        const auto frame_count = capture_android_backtrace(frames.data(), frames.size());
+
+        std::size_t frame_start = 0;
+        while (frame_start < frame_count && frames[frame_start] == nullptr) {
+            ++frame_start;
+        }
+        if (frame_start < frame_count) {
+            ++frame_start; // Skip the helper frame itself.
+        }
+
+        const auto dump_count = frame_count > frame_start ? frame_count - frame_start : 0;
+        __android_log_print(ANDROID_LOG_FATAL, AndroidCrashLogTag, "Native backtrace (%zu frames):", dump_count);
+        logger.error("Native backtrace", dump_count, "frames");
+
+        for (std::size_t i = frame_start; i < frame_count; ++i) {
+            Dl_info info {};
+            std::string frame_message;
+            if (dladdr(frames[i], &info) != 0 && info.dli_sname != nullptr) {
+                const auto symbol_name = utils::demangle(info.dli_sname);
+                const auto base = reinterpret_cast<std::uintptr_t>(info.dli_saddr);
+                const auto pc = reinterpret_cast<std::uintptr_t>(frames[i]);
+                const auto offset = pc >= base ? pc - base : 0;
+                frame_message = std::format(
+                    "#{:02} pc {:p} {} ({}+0x{:x})",
+                    i - frame_start,
+                    frames[i],
+                    info.dli_fname != nullptr ? info.dli_fname : "<unknown>",
+                    symbol_name,
+                    offset);
+            }
+            else {
+                frame_message = std::format("#{:02} pc {:p}", i - frame_start, frames[i]);
+            }
+
+            __android_log_write(ANDROID_LOG_FATAL, AndroidCrashLogTag, frame_message.c_str());
+            logger.error(frame_message);
+        }
     }
 #endif
 
@@ -908,18 +1048,10 @@ private:
         }
         in_handler = true;
 
+        const int last_signal = g_last_signal.exchange(0);
+        const char* signal_info = last_signal != 0 ? format_signal_reason(last_signal) : nullptr;
+
         try {
-            auto& logger = Logger::get_instance();
-
-            // 先写信号信息
-            if (auto sig_reason = g_last_signal_reason.load()) {
-                logger.error("=== FATAL ERROR ===");
-                logger.error("Signal caught:", sig_reason);
-                logger.flush();
-                write_crash_file("Fatal Signal", sig_reason);
-            }
-
-            // 再处理 C++ 异常
             std::string exception_info = "Unknown exception";
             if (auto eptr = std::current_exception()) {
                 try {
@@ -933,11 +1065,29 @@ private:
                 }
             }
 
+#ifdef __ANDROID__
+            if (last_signal == 0) {
+                log_android_crash_terminate(exception_info.c_str());
+            }
+#endif
+
+            auto& logger = Logger::get_instance();
+
+            if (signal_info != nullptr) {
+                logger.error("=== FATAL ERROR ===");
+                logger.error("Signal caught:", signal_info);
+                logger.flush();
+                write_crash_file("Fatal Signal", signal_info);
+            }
+
             logger.error("=== FATAL ERROR ===");
             logger.error("Version", MAA_VERSION);
             logger.error("Built at", __DATE__, __TIME__);
             logger.error("User Dir", UserDir.get());
             logger.error("Unhandled exception caught:", exception_info);
+#ifdef __ANDROID__
+            dump_android_stacktrace(logger);
+#endif
             logger.error("Program terminating...");
             logger.error("===================");
             logger.flush();
@@ -953,40 +1103,46 @@ private:
 
     static void signal_handler(int sig)
     {
-        std::string sig_name;
-        switch (sig) {
-        case SIGSEGV:
-            sig_name = "SIGSEGV (Segmentation Fault)";
-            break;
-        case SIGABRT:
-            sig_name = "SIGABRT (Abort)";
-            break;
-        case SIGFPE:
-            sig_name = "SIGFPE (Floating Point Error)";
-            break;
-        case SIGILL:
-            sig_name = "SIGILL (Illegal Instruction)";
-            break;
-        default:
-            sig_name = "Signal " + std::to_string(sig);
-            break;
-        }
-        g_last_signal_reason.store(sig_name.c_str());
+#ifdef __ANDROID__
+        log_android_crash_signal(format_signal_reason(sig));
+#endif
+        g_last_signal.store(sig);
         custom_terminate_handler();
         std::_Exit(EXIT_FAILURE);
     }
 
+#ifdef _WIN32
+    // terminate handler 必须在终止进程前结束，标准禁止其返回；不能直接复用会正常返回的 custom_terminate_handler。
+    [[noreturn]] static void windows_terminate_handler() noexcept
+    {
+        custom_terminate_handler();
+        std::_Exit(EXIT_FAILURE);
+    }
+#endif
+
+#ifdef __ANDROID__
+    [[noreturn]] static void android_terminate_handler() noexcept
+    {
+        custom_terminate_handler();
+        std::_Exit(EXIT_FAILURE);
+    }
+#endif
+
     static void initialize_exception_handlers()
     {
 #ifdef _WIN32
-        // Windows: 设置未处理异常过滤器
+        // Windows: 未处理硬件异常由过滤器记录后交给 WER 收集 dump；C++ 未捕获异常由 terminate 处理程序可靠记录
         SetUnhandledExceptionFilter(unhandled_exception_filter);
+        std::set_terminate(windows_terminate_handler);
 #endif
-
+#ifdef __ANDROID__
+        std::set_terminate(android_terminate_handler);
+#endif
         std::signal(SIGSEGV, signal_handler);
         std::signal(SIGABRT, signal_handler);
         std::signal(SIGFPE, signal_handler);
         std::signal(SIGILL, signal_handler);
+
 #ifdef ASST_DEBUG
         const auto& path = UserDir.get() / "debug" / "crash.log";
         if (std::filesystem::exists(path)) {
@@ -1008,12 +1164,7 @@ private:
                 m_scopes.next(),
                 std::forward<args_t>(args)...);
 #else
-            return LogStream(
-                std::unique_lock { m_trace_mutex },
-                m_of,
-                lv,
-                m_scopes.next(),
-                std::forward<args_t>(args)...);
+            return LogStream(std::unique_lock { m_trace_mutex }, m_of, lv, std::forward<args_t>(args)...);
 #endif
         }
         else {
@@ -1025,12 +1176,7 @@ private:
                 m_scopes.next(),
                 std::forward<args_t>(args)...);
 #else
-            return LogStream(
-                std::unique_lock { m_trace_mutex },
-                null_stream,
-                lv,
-                m_scopes.next(),
-                std::forward<args_t>(args)...);
+            return LogStream(std::unique_lock { m_trace_mutex }, null_stream, lv, std::forward<args_t>(args)...);
 #endif
         }
     }

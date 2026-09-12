@@ -3,6 +3,7 @@
   <!-- Project -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <RuntimeIdentifier Condition="$(Platform)=='x64'">win-x64</RuntimeIdentifier>
     <RuntimeIdentifier Condition="$(Platform)=='ARM64'">win-arm64</RuntimeIdentifier>
     <OutputType>WinExe</OutputType>
@@ -27,10 +28,15 @@
     <BeautyUsePatch Condition="'$(RuntimeIdentifier)' != ''">true</BeautyUsePatch>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
-    <PostBuildEvent>
+    <PostBuildEvent Condition="'$(OS)' == 'Windows_NT'">
       echo Creating resource directory link...
       if exist "$(OutputPath)resource" rmdir "$(OutputPath)resource"
       mklink /J "$(OutputPath)resource" "$(SolutionDir)\..\resource"
+      echo Resource directory link created successfully
+    </PostBuildEvent>
+    <PostBuildEvent Condition="'$(OS)' != 'Windows_NT'">
+      echo Creating resource directory link...
+      ln -sfn "$([MSBuild]::NormalizeDirectory($(SolutionDir), ".."))resource" "$(OutputPath)resource"
       echo Resource directory link created successfully
     </PostBuildEvent>
   </PropertyGroup>
@@ -91,10 +97,13 @@
   <ItemGroup>
     <AdditionalFiles Include="stylecop.json" />
     <Resource Include="newlogo.ico" />
-    <Resource Include="Res\Backgrounds\*" />
+    <!--  Internal 为内部资源（喜报等，嵌入）；Wallpapers 为用户可选壁纸，复制到输出目录供下拉列表读取  -->
+    <Resource Include="Res\Backgrounds\Internal\**\*" />
+    <Content Include="Res\Backgrounds\Wallpapers\**\*" CopyToOutputDirectory="PreserveNewest" />
     <Resource Include="Res\Img\*" />
     <Resource Include="Res\Img\EasterEgg\*" />
     <Resource Include="Res\Img\Operator\*" />
+    <Content Include="Res\Video\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\README.md" Pack="True" PackagePath="/" />
   </ItemGroup>
 
@@ -147,5 +156,4 @@
     <PackageReference Include="System.Management" Version="10.0.0" />
     <PackageReference Include="WindowsAPICodePack" Version="8.0.12" />
   </ItemGroup>
-
 </Project>

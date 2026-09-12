@@ -13,12 +13,25 @@ public:
     using InfrastAbstractTask::InfrastAbstractTask;
     virtual ~InfrastProductionTask() override = default;
 
-    InfrastProductionTask& set_uses_of_drone(std::string uses_of_drones) noexcept;
-    std::string get_uses_of_drone() const noexcept;
+    // 来自params的无人机使用参数，自定义基建配置启用时不触发
+    InfrastProductionTask& set_drones_usage_from_params(std::string usage) noexcept;
+    std::string get_drones_usage_from_params() const noexcept;
     void set_custom_drones_config(infrast::CustomDronesConfig drones_config);
     void clear_custom_drones_config();
 
     void set_skip_shift(bool skip) noexcept { m_skip_shift = skip; }
+
+    void set_default_mode(bool enabled) noexcept { m_default_mode = enabled; }
+
+    void set_inspect_only(bool enabled) noexcept { m_inspect_only = enabled; }
+
+    void set_abyssal_hunter_enabled(bool enabled) noexcept { m_abyssal_hunter_enabled = enabled; }
+
+    void set_pinus_sylvestris_enabled(bool enabled) noexcept { m_pinus_sylvestris_enabled = enabled; }
+
+    void set_perception_information_enabled(bool enabled) noexcept { m_perception_information_enabled = enabled; }
+
+    void set_worldly_plight_enabled(bool enabled) noexcept { m_worldly_plight_enabled = enabled; }
 
 protected:
     bool shift_facility_list();
@@ -26,26 +39,35 @@ protected:
     bool opers_detect_with_swipe();
     // 返回当前页面的干员数 (可用?
     size_t opers_detect();
+    bool resolve_operator_identity(infrast::Oper& oper) const;
     bool optimal_calc();
     bool opers_choose();
+    size_t select_abyssal_hunters(const std::vector<std::string>& operator_ids);
     bool use_drone();
     void set_product(std::string product_name) noexcept;
 
     infrast::SkillsComb efficient_regex_calc(std::unordered_set<infrast::Skill> skills) const;
 
     std::string m_product;
-    std::string m_uses_of_drones;
+    std::string m_drones_usage_from_params;
     int m_cur_num_of_locked_opers = 0;
     std::vector<infrast::Oper> m_all_available_opers;
     std::vector<infrast::SkillsComb> m_optimal_combs;
     std::vector<Rect> m_facility_list_tabs;
     size_t max_num_of_opers_per_page = 0;
-    bool m_is_use_custom_drones = false;
+    // 来自自定义基建配置的无人机使用参数
+    bool m_is_use_drones_from_custom = false;
     infrast::CustomDronesConfig m_custom_drones_config;
     bool m_skip_shift = false;
+    bool m_pinus_sylvestris_enabled = false;
+    bool m_perception_information_enabled = false;
+    bool m_worldly_plight_enabled = false;
+    bool m_abyssal_hunter_enabled = false;
+    bool m_default_mode = false;
+    bool m_inspect_only = false;
 
 protected:
-    void change_product();
+    bool change_product();
     bool m_is_product_incorrect = false;
 };
 }

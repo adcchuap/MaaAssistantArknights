@@ -16,7 +16,7 @@ using System.Runtime.InteropServices;
 using System.Timers;
 using System.Windows;
 using System.Windows.Controls;
-using MaaWpfGui.Constants;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Helper;
 using MaaWpfGui.Main;
 using MaaWpfGui.ViewModels.UI;
@@ -42,11 +42,14 @@ public partial class NotifyIcon
         InitializeComponent();
 
         uint doubleClickTime = GetDoubleClickTime();
+        if (doubleClickTime == 0)
+        {
+            doubleClickTime = 500;
+        }
         _clickTimer = new(doubleClickTime) {
             AutoReset = false,
         };
-        _clickTimer.Elapsed += (s, e) =>
-        {
+        _clickTimer.Elapsed += (s, e) => {
             _canClick = true;
         };
 
@@ -60,7 +63,7 @@ public partial class NotifyIcon
     private void InitIcon()
     {
         notifyIcon.Icon = AppIcon.GetIcon();
-        notifyIcon.Visibility = Convert.ToBoolean(ConfigurationHelper.GetGlobalValue(ConfigurationKeys.UseTray, bool.TrueString)) ? Visibility.Visible : Visibility.Collapsed;
+        notifyIcon.Visibility = ConfigFactory.Root.Gui.UseTray ? Visibility.Visible : Visibility.Collapsed;
 
         notifyIcon.Click += NotifyIcon_MouseClick;
         notifyIcon.MouseDoubleClick += NotifyIcon_MouseClick;
@@ -81,13 +84,30 @@ public partial class NotifyIcon
             }
 
             var langMenu = new MenuItem() { Header = lang.Value };
-            langMenu.Click += (_, _) =>
-            {
+            langMenu.Click += (_, _) => {
                 SettingsViewModel.GuiSettings.Language = lang.Key;
             };
 
             switchLangMenu.Items.Add(langMenu);
         }
+
+        LocalizationHelper.LanguageChanged += RefreshMenuLocalization;
+        Unloaded += (_, _) => LocalizationHelper.LanguageChanged -= RefreshMenuLocalization;
+    }
+
+    /// <summary>
+    /// 刷新托盘图标的右键菜单文本。
+    /// </summary>
+    private void RefreshMenuLocalization()
+    {
+        startMenu.SetResourceReference(MenuItem.HeaderProperty, "Farming");
+        stopMenu.SetResourceReference(MenuItem.HeaderProperty, "Stop");
+        switchLangMenu.SetResourceReference(MenuItem.HeaderProperty, "SwitchLanguage");
+        forceShowMenu.SetResourceReference(MenuItem.HeaderProperty, "ForceShow");
+        hideTrayMenu.SetResourceReference(MenuItem.HeaderProperty, "HideTray");
+        toggleOverlayMenu.SetResourceReference(MenuItem.HeaderProperty, "ToggleOverlay");
+        restartMenu.SetResourceReference(MenuItem.HeaderProperty, "Restart");
+        exitMenu.SetResourceReference(MenuItem.HeaderProperty, "Exit");
     }
 
     // 不知道是干嘛的，先留着

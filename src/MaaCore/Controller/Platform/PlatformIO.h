@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace asst
 {
@@ -33,7 +34,9 @@ public:
 
     virtual std::shared_ptr<IOHandler> interactive_shell(const std::string& cmd) = 0;
 
-    virtual void release_adb(const std::string& adb_release, int64_t timeout = 20000) = 0;
+    virtual void set_adb_serial(std::string_view) {}
+
+    virtual void release_adb(const std::string& adb_release, int64_t timeout = 20'000) = 0;
 
     bool m_support_socket = false;
 };

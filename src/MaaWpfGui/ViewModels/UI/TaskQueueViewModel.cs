@@ -18,11 +18,11 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -37,7 +37,7 @@ using MaaWpfGui.Extensions;
 using MaaWpfGui.Helper;
 using MaaWpfGui.Main;
 using MaaWpfGui.Models;
-using MaaWpfGui.Services.Notification;
+using MaaWpfGui.Services.ExternalNotification;
 using MaaWpfGui.States;
 using MaaWpfGui.Utilities;
 using MaaWpfGui.Utilities.ValueType;
@@ -45,9 +45,9 @@ using MaaWpfGui.ViewModels.Items;
 using MaaWpfGui.ViewModels.UserControl.Settings;
 using MaaWpfGui.ViewModels.UserControl.TaskQueue;
 using MaaWpfGui.Views.Dialogs;
-using Newtonsoft.Json.Linq;
 using Serilog;
 using Stylet;
+using static MaaWpfGui.Configuration.Global.Gui;
 using static MaaWpfGui.Main.AsstProxy;
 using Application = System.Windows.Application;
 using Screen = Stylet.Screen;
@@ -133,6 +133,16 @@ public class TaskQueueViewModel : Screen
     public static UserDataUpdateSettingsUserControlModel UserDataUpdateTask => UserDataUpdateSettingsUserControlModel.Instance;
 
     /// <summary>
+    /// Gets 库存维持任务Model
+    /// </summary>
+    public static DepotMaintainTaskUserControlModel DepotMaintainTask => DepotMaintainTaskUserControlModel.Instance;
+
+    /// <summary>
+    /// Gets 更换主题任务Model
+    /// </summary>
+    public static SwitchThemeTaskUserControlModel SwitchThemeTask => SwitchThemeTaskUserControlModel.Instance;
+
+    /// <summary>
     /// Gets 生稀盐酸任务Model
     /// </summary>
     public static CustomSettingsUserControlModel CustomTask => CustomSettingsUserControlModel.Instance;
@@ -177,9 +187,19 @@ public class TaskQueueViewModel : Screen
                 TaskItemViewModels[e.NewStartingIndex].Index = e.NewStartingIndex;
                 TaskItemViewModels.FirstOrDefault(i => i.EnableSetting)?.EnableSetting = false;
                 TaskItemViewModels[e.NewStartingIndex].EnableSetting = true;
+
+                for (int i = e.NewStartingIndex + 1; i < TaskItemViewModels.Count; i++)
+                {
+                    TaskItemViewModels[i].Index = i;
+                }
             }
             else if (e.Action == NotifyCollectionChangedAction.Remove)
             {
+                foreach (var item in e.OldItems?.OfType<TaskItemViewModel>() ?? [])
+                {
+                    (item as IDisposable)?.Dispose(); // 释放事件订阅; 暂未支持TaskItemViewModels.clear()
+                }
+
                 if (e.OldStartingIndex >= 0 && e.OldStartingIndex < ConfigFactory.CurrentConfig.TaskQueue.Count)
                 {
                     TaskSettingVisibilities.SetTaskSettingVisible(ConfigFactory.CurrentConfig.TaskQueue[e.OldStartingIndex], false);
@@ -198,8 +218,15 @@ public class TaskQueueViewModel : Screen
                     task?.EnableSetting = true;
                 }
             }
+            else if (e.Action == NotifyCollectionChangedAction.Reset)
+            {
+                ConfigFactory.CurrentConfig.TaskQueue.Clear();
+                TaskSettingVisibilities.SetPostAction(true);
+            }
         });
     }
+
+    #region Overlay
 
     public static void ChooseOverlayTarget()
     {
@@ -263,6 +290,8 @@ public class TaskQueueViewModel : Screen
             EnableOverlay();
         }
     }
+
+    #endregion Overlay
 
     /// <summary>
     /// Gets or private sets the view models of log items.
@@ -439,12 +468,43 @@ public class TaskQueueViewModel : Screen
     }
 
     /// <summary>
-    /// Checks after completion.
+    /// 自然完成后的收尾：执行结束脚本后执行完成后动作。仅由 <see cref="AsstProxy"/> 的
+    /// <c>AllTasksCompleted</c> 回调调用，结束脚本恒执行。
     /// </summary>
     /// <returns>Task</returns>
     public async Task CheckAfterCompleted()
     {
-        await Task.Run(() => SettingsViewModel.GameSettings.RunScript("EndsWithScript"));
+        RunningState.Instance.LockInterrupt();
+        try
+        {
+            await RunStopScriptOnceAsync();
+            await RunPostActionsCoreAsync();
+        }
+        finally
+        {
+            RunningState.Instance.UnlockInterrupt();
+        }
+    }
+
+    /// <summary>
+    /// 手动停止路径（时长上限到点）的完成后动作；结束脚本已由 <see cref="StopManuallyAsync"/> 按开关发射。
+    /// </summary>
+    /// <returns>Task</returns>
+    private async Task RunPostActionsAfterManualStopAsync()
+    {
+        RunningState.Instance.LockInterrupt();
+        try
+        {
+            await RunPostActionsCoreAsync();
+        }
+        finally
+        {
+            RunningState.Instance.UnlockInterrupt();
+        }
+    }
+
+    private async Task RunPostActionsCoreAsync()
+    {
         var actions = PostActionSetting;
         _logger.Information("Post actions: " + actions.ActionDescription);
 
@@ -465,7 +525,7 @@ public class TaskQueueViewModel : Screen
             await Task.Delay(1000);
         }
 
-        if (actions.ExitEmulator && !SettingsViewModel.ConnectSettings.UseAttachWindow)
+        if (actions.ExitEmulator && !SettingsViewModel.ConnectSettings.IsPCConnectConfig)
         {
             DoKillEmulator();
             await Task.Delay(1000);
@@ -600,17 +660,31 @@ public class TaskQueueViewModel : Screen
     {
         _runningState = RunningState.Instance;
         _runningState.StateChanged += (_, e) => {
-            Idle = e.Idle;
-            Inited = e.Inited;
-            Stopping = e.Stopping;
+            // 回到空闲的变化沿时重置主任务进度（原 Idle 镜像置 true 的联动；
+            // 空闲期内其他状态字段的广播不重复触发）
+            if (!e.OldState.Idle && e.NewState.Idle)
+            {
+                UpdateMainTasksProgress(0);
+            }
 
-            Instances.SettingsViewModel.Idle = e.Idle;
-            if (!e.Idle)
+            if (!e.NewState.Idle)
             {
                 Instances.Data.ClearCache();
             }
+
+            // 每轮运行开始（离开空闲）时重置结束脚本发射权；停止中不重置，避免把已合法发射的标志清零导致二次发射
+            if (e.OldState.Idle && !e.NewState.Idle)
+            {
+                Interlocked.Exchange(ref _stopScriptLaunched, 0);
+            }
+
+            if (e.NewState.Idle && _runDurationLimitOnce)
+            {
+                _runDurationLimitOnce = false;
+                SettingsViewModel.GameSettings.EnableRunDurationLimit ??= false;
+            }
         };
-        _runningState.TimeoutOccurred += RunningState_TimeOut;
+        _runningState.StallOccurred += RunningState_Stalled;
 
         if (Instances.VersionUpdateDialogViewModel.IsDebugVersion() || File.Exists("DEBUG") || File.Exists("DEBUG.txt"))
         {
@@ -619,21 +693,17 @@ public class TaskQueueViewModel : Screen
         }
     }
 
-    private void RunningState_TimeOut(object? sender, string message)
+    private void RunningState_Stalled(object? sender, string message)
     {
-        Execute.OnUIThread(() => {
-            AddLog(message, UiLogColor.Warning);
-            ToastNotification.ShowDirect(message);
-            if (!SettingsViewModel.ExternalNotificationSettings.ExternalNotificationSendWhenTimeout)
-            {
-                return;
-            }
-
+        AddLog(message, UiLogColor.Warning, notifyActivity: false);
+        ToastNotification.ShowDirect(message);
+        if (SettingsViewModel.ExternalNotificationSettings.ExternalNotificationSendWhenStalled)
+        {
             var lastLogs = LogItemViewModels
                 .TakeLast(5)
                 .Aggregate(string.Empty, (current, logItem) => current + $"[{logItem.Time}][{logItem.Color}]{logItem.Content}\n");
             ExternalNotificationService.Send(message, lastLogs);
-        });
+        }
     }
 
     protected override void OnInitialActivate()
@@ -646,6 +716,20 @@ public class TaskQueueViewModel : Screen
         InitTimer();
 
         _ = UpdateDatePromptAndStagesWeb();
+
+        LocalizationHelper.LanguageChanged += () => {
+            DisplayName = LocalizationHelper.GetString("Farming");
+            RefreshTaskTypeListLocalization();
+
+            // 刷新反选按钮的两个本地化文本
+            RefreshInverseModeText();
+
+            // 延迟到所有 LanguageChanged 回调执行完毕后再更新关卡列表
+            // 确保 StageManager.RefreshLocalization 已更新 StageInfo 的 Display/Tip
+            Application.Current.Dispatcher.InvokeAsync(
+                () => UpdateDatePromptAndStagesLocally(),
+                System.Windows.Threading.DispatcherPriority.Loaded);
+        };
     }
 
     /// <inheritdoc/>
@@ -745,7 +829,7 @@ public class TaskQueueViewModel : Screen
 
             _lastTimerElapsed = currentTime;
 
-            if ((currentTime.Hour == 3 || currentTime.Hour == 13 || currentTime.Hour == 23) && currentTime.Minute == 25 && !Idle)
+            if ((currentTime.Hour == 3 || currentTime.Hour == 13 || currentTime.Hour == 23) && currentTime.Minute == 25 && !_runningState.GetIdle())
             {
                 AchievementTrackerHelper.Instance.Unlock(AchievementIds.Time325);
             }
@@ -757,10 +841,99 @@ public class TaskQueueViewModel : Screen
             InfrastTask.RefreshInfrastTimeRotationDisplay();
 
             await HandleTimerLogic(currentTime);
+
+            await HandleRunDurationLimit();
         }
         catch
         {
             // ignored
+        }
+    }
+
+    private async Task HandleRunDurationLimit()
+    {
+        if (!_runningState.TryConsumeRunDeadline(out var limitMinutes, out var executePostActions))
+        {
+            return;
+        }
+
+        await StopByRunDurationLimitAsync(limitMinutes, executePostActions);
+    }
+
+    private async Task StopByRunDurationLimitAsync(int limitMinutes, bool executePostActions)
+    {
+        try
+        {
+            if (_runningState.GetStopping() || _runningState.GetIdle())
+            {
+                return;
+            }
+
+            // 用于识别等待期间本轮是否已结束，并由定时执行开始了新一轮
+            var startTaskTime = Instances.AsstProxy.StartTaskTime;
+
+            _logger.Information("Run duration limit reached: {LimitMinutes} min, stopping", limitMinutes);
+            var message = LocalizationHelper.GetStringFormat("RunDurationLimitReached", limitMinutes);
+            AddLog(message, UiLogColor.Warning);
+            ToastNotification.ShowDirect(message);
+
+            var waited = false;
+            if (RoguelikeTask.RoguelikeDelayAbortUntilCombatComplete && RoguelikeInCombatAndShowWait)
+            {
+                Waiting = true;
+                waited = true;
+                AddLog(LocalizationHelper.GetString("Waiting"));
+                await WaitUntilRoguelikeCombatComplete();
+            }
+
+            // 等待期间本轮已自然结束或定时执行已开始新一轮时不再停止，交由原流程处理完成后动作；
+            // 这两种情况不会经过 SetStopped，需自行恢复等待状态
+            if (Instances.AsstProxy.StartTaskTime != startTaskTime || !Instances.AsstProxy.AsstRunning())
+            {
+                if (waited)
+                {
+                    Waiting = false;
+                }
+
+                _logger.Information("Run already ended or a new run started, skip stopping by run duration limit");
+                return;
+            }
+
+            // 已在停止中时交由原流程处理，避免重复执行完成后动作
+            if (_runningState.GetStopping())
+            {
+                return;
+            }
+
+            // 到点视为一次手动停止（设置开且肉鸽战斗中时前面已等待过战斗结束），结束脚本按当前任务链的开关闭合
+            var stopped = await StopManuallyAsync();
+
+            if (!stopped || !executePostActions)
+            {
+                return;
+            }
+
+            await RunPostActionsAfterManualStopAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to stop by run duration limit");
+        }
+    }
+
+    // 本轮时长上限来自右键半选（仅生效一次），本轮结束后恢复为未勾选
+    private bool _runDurationLimitOnce;
+
+    /// <summary>
+    /// 按当前设置设置运行时长截止时间，各启动路径在 <c>AsstStart</c> 成功后调用。
+    /// </summary>
+    public void SetRunDeadlineFromSettings()
+    {
+        var runtimeSettings = ConfigFactory.CurrentConfig.Gui.RuntimeSettings;
+        if (runtimeSettings.EnableRunDurationLimit != false)
+        {
+            _runningState.SetRunDeadline(runtimeSettings.RunDurationLimitMinutes, runtimeSettings.RunDurationLimitExecutePostActions);
+            _runDurationLimitOnce = runtimeSettings.EnableRunDurationLimit == null;
         }
     }
 
@@ -787,7 +960,7 @@ public class TaskQueueViewModel : Screen
         var delayTime = CalculateRandomDelay();
         _ = Task.Run(async () => {
             await Task.Delay(delayTime);
-            await _runningState.UntilIdleAsync(60000);
+            await _runningState.UntilIdleAsync();
             await UpdateDatePromptAndStagesWeb();
             _isUpdatingDatePrompt = false;
         });
@@ -827,7 +1000,8 @@ public class TaskQueueViewModel : Screen
 
         for (int i = 0; i < 8; ++i)
         {
-            if (SettingsViewModel.TimerSettings.TimerModels.Timers[i].IsOn == false)
+            var timer = SettingsViewModel.TimerSettings.TimerList[i];
+            if (timer.IsEnabled == false)
             {
                 continue;
             }
@@ -835,8 +1009,8 @@ public class TaskQueueViewModel : Screen
             DateTime startTime = new DateTime(currentTime.Year,
                 currentTime.Month,
                 currentTime.Day,
-                SettingsViewModel.TimerSettings.TimerModels.Timers[i].Hour,
-                SettingsViewModel.TimerSettings.TimerModels.Timers[i].Min,
+                timer.Hour,
+                timer.Minute,
                 0);
             DateTime restartDateTime = startTime.AddMinutes(-2);
 
@@ -846,8 +1020,7 @@ public class TaskQueueViewModel : Screen
                 restartDateTime = restartDateTime.AddDays(1);
             }
 
-            if (currentTime == restartDateTime &&
-                Instances.SettingsViewModel.CurrentConfiguration != SettingsViewModel.TimerSettings.TimerModels.Timers[i].TimerConfig)
+            if (currentTime == restartDateTime && Instances.SettingsViewModel.CurrentConfiguration != timer.Config)
             {
                 timeToChangeConfig = true;
                 configIndex = i;
@@ -868,35 +1041,35 @@ public class TaskQueueViewModel : Screen
 
     private async Task HandleTimerLogic(DateTime currentTime)
     {
-        if (!_runningState.GetIdle() && !SettingsViewModel.TimerSettings.ForceScheduledStart)
+        if (!_runningState.CanInterrupt() && !SettingsViewModel.TimerSettings.ForceScheduledStart)
         {
             return;
         }
 
-        var (timeToStart, timeToChangeConfig, configIndex) = CheckTimers(currentTime);
+        var (timeToStart, timeToChangeConfig, timerIndex) = CheckTimers(currentTime);
 
         if (timeToChangeConfig)
         {
-            _logger.Information("Scheduled configuration change: Timer Index: {ConfigIndex}", configIndex);
-            HandleConfigChange(configIndex);
+            _logger.Information("Scheduled configuration change: Timer Index: {TimerIndex}", timerIndex);
+            HandleConfigChange(timerIndex);
             return;
         }
 
         if (timeToStart)
         {
-            _logger.Information("Scheduled start: Timer Index: {ConfigIndex}", configIndex);
-            await HandleScheduledStart(configIndex);
+            _logger.Information("Scheduled start: Timer Index: {TimerIndex}", timerIndex);
+            await HandleScheduledStart(timerIndex);
 
-            SettingsViewModel.TimerSettings.TimerModels.Timers[configIndex].IsOn ??= false;
+            SettingsViewModel.TimerSettings.TimerList[timerIndex].IsEnabled ??= false;
         }
     }
 
-    private void HandleConfigChange(int configIndex)
+    private void HandleConfigChange(int timerIndex)
     {
         if (SettingsViewModel.TimerSettings.CustomConfig &&
             (_runningState.GetIdle() || SettingsViewModel.TimerSettings.ForceScheduledStart))
         {
-            Instances.SettingsViewModel.CurrentConfiguration = SettingsViewModel.TimerSettings.TimerModels.Timers[configIndex].TimerConfig;
+            Instances.SettingsViewModel.CurrentConfiguration = SettingsViewModel.TimerSettings.TimerList[timerIndex].Config;
         }
     }
 
@@ -905,13 +1078,13 @@ public class TaskQueueViewModel : Screen
         if (SettingsViewModel.TimerSettings.ForceScheduledStart)
         {
             if (SettingsViewModel.TimerSettings.CustomConfig &&
-                Instances.SettingsViewModel.CurrentConfiguration != SettingsViewModel.TimerSettings.TimerModels.Timers[configIndex].TimerConfig)
+                Instances.SettingsViewModel.CurrentConfiguration != SettingsViewModel.TimerSettings.TimerList[configIndex].Config)
             {
                 _logger.Warning(
                     "Scheduled start skipped: Custom configuration is enabled, but the current configuration does not match the scheduled timer configuration (Timer Index: {ConfigIndex}). Current Configuration: {CurrentConfiguration}, Scheduled Configuration: {TimerConfig}",
                     configIndex,
                     Instances.SettingsViewModel.CurrentConfiguration,
-                    SettingsViewModel.TimerSettings.TimerModels.Timers[configIndex].TimerConfig);
+                    SettingsViewModel.TimerSettings.TimerList[configIndex].Config);
                 return;
             }
 
@@ -949,6 +1122,24 @@ public class TaskQueueViewModel : Screen
         AchievementTrackerHelper.Instance.AddProgressToGroup(AchievementIds.ScheduleMasterGroup);
     }
 
+    /// <summary>
+    /// 启动后自动运行前的倒计时确认。超时返回 <see langword="false"/>（继续自动开），
+    /// 用户点取消返回 <see langword="true"/>（本次不自动开）。
+    /// 不强制显示主窗口（与关机倒计时不同）。
+    /// </summary>
+    /// <param name="content">主文案</param>
+    /// <param name="tipContent">提示文案</param>
+    /// <param name="seconds">倒计时秒数</param>
+    /// <returns>是否被用户取消</returns>
+    public Task<bool> ConfirmStartupAutoRunAsync(string content, string tipContent, int seconds = 10)
+    {
+        return TimerCanceledAsync(
+            content,
+            tipContent,
+            LocalizationHelper.GetString("Cancel"),
+            seconds);
+    }
+
     private static async Task<bool> TimerCanceledAsync(string content = "", string tipContent = "", string buttonContent = "", int seconds = 10)
     {
         if (Application.Current.Dispatcher.CheckAccess())
@@ -962,23 +1153,31 @@ public class TaskQueueViewModel : Screen
         {
             var canceled = false;
             var delay = TimeSpan.FromSeconds(seconds);
-            var dialogUserControl = new Views.UserControl.TextDialogWithTimerUserControl(
-                content,
-                tipContent,
-                buttonContent,
-                delay.TotalMilliseconds);
-            var dialog = HandyControl.Controls.Dialog.Show(dialogUserControl, nameof(Views.UI.RootView));
-            var tcs = new TaskCompletionSource<bool>();
-            dialogUserControl.Click += (_, _) => {
-                canceled = true;
+            RunningState.Instance.LockInterrupt();
+            try
+            {
+                var dialogUserControl = new Views.Dialogs.TextWithTimerDialogView(
+                    content,
+                    tipContent,
+                    buttonContent,
+                    delay.TotalMilliseconds);
+                var dialog = HandyControl.Controls.Dialog.Show(dialogUserControl, nameof(Views.UI.RootView));
+                var tcs = new TaskCompletionSource<bool>();
+                dialogUserControl.Click += (_, _) => {
+                    canceled = true;
+                    dialog.Close();
+                    tcs.TrySetResult(true);
+                };
+                _logger.Information("Timer wait time: {Seconds}", seconds);
+                await Task.WhenAny(Task.Delay(delay), tcs.Task);
                 dialog.Close();
-                tcs.TrySetResult(true);
-            };
-            _logger.Information("Timer wait time: {Seconds}", seconds);
-            await Task.WhenAny(Task.Delay(delay), tcs.Task);
-            dialog.Close();
-            _logger.Information("Timer canceled: {Canceled}", canceled);
-            return canceled;
+                _logger.Information("Timer canceled: {Canceled}", canceled);
+                return canceled;
+            }
+            finally
+            {
+                RunningState.Instance.UnlockInterrupt();
+            }
         }
     }
 
@@ -987,13 +1186,34 @@ public class TaskQueueViewModel : Screen
     /// </summary>
     private void InitializeItems()
     {
+        if (ConfigFactory.CurrentConfig.TaskQueue.Count == 0)
+        {
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new StartUpTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new FightTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new InfrastTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new RecruitTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new MallTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new AwardTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new RoguelikeTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new ReclamationTask());
+            ConfigFactory.CurrentConfig.TaskQueue.Add(new UserDataUpdateTask());
+        }
+
+        // 临时补足到8个，支持添加删除后移除此代码
+        if (ConfigFactory.Root.Timers.List.Count < 8)
+        {
+            for (int i = ConfigFactory.Root.Timers.List.Count; i < 8; i++)
+            {
+                ConfigFactory.Root.Timers.List.Add(new(i, string.Empty));
+            }
+        }
         List<TaskItemViewModel> taskqueue = [];
         for (int i = 0; i < ConfigFactory.CurrentConfig.TaskQueue.Count; i++)
         {
             var task = ConfigFactory.CurrentConfig.TaskQueue.ElementAt(i);
             if (task is not null)
             {
-                taskqueue.Add(new TaskItemViewModel(task.NameDisplay, task.IsEnable) { Index = i });
+                taskqueue.Add(new TaskItemViewModel(task.IsEnable) { Index = i });
             }
         }
 
@@ -1049,9 +1269,10 @@ public class TaskQueueViewModel : Screen
     {
         UpdateDatePrompt();
         var task = FightTask.UpdateStageList();
+        var task2 = DepotMaintainTask.UpdateStageList();
         if (waitStageListUpdated)
         {
-            task.Wait();
+            Task.WaitAll(task, task2);
         }
         ToolboxViewModel.UpdateMiniGameTaskList();
     }
@@ -1178,6 +1399,7 @@ public class TaskQueueViewModel : Screen
     /// <param name="fetchLatestImage">Whether to force fetching a fresh screenshot instead of using cache.</param>
     /// <param name="useCardImageAsToolTip">Whether to use the current card's image as toolTip.</param>
     /// <param name="splitMode">Whether to split cards before/after this log.</param>
+    /// <param name="notifyActivity">Whether this log should notify activity (and reset idle timer).</param>
     public void AddLog(string? content,
         string color = UiLogColor.Trace,
         string weight = "Regular",
@@ -1185,11 +1407,34 @@ public class TaskQueueViewModel : Screen
         bool updateCardImage = false,
         bool fetchLatestImage = false,
         bool useCardImageAsToolTip = false,
-        LogCardSplitMode splitMode = LogCardSplitMode.None)
+        LogCardSplitMode splitMode = LogCardSplitMode.None,
+        bool notifyActivity = true)
     {
+        if (notifyActivity)
+        {
+            RunningState.Instance.NotifyOutputActivity();
+        }
+
         bool isEmpty = string.IsNullOrEmpty(content);
         bool needsBeforeSplit = splitMode == LogCardSplitMode.Before || splitMode == LogCardSplitMode.Both;
         bool needsAfterSplit = splitMode == LogCardSplitMode.After || splitMode == LogCardSplitMode.Both;
+
+        // 记录日志
+        if (!isEmpty)
+        {
+            switch (color)
+            {
+                case UiLogColor.Error:
+                    _logger.Error("{Content}", content);
+                    break;
+                case UiLogColor.Warning:
+                    _logger.Warning("{Content}", content);
+                    break;
+                default:
+                    _logger.Information("{Content}", content);
+                    break;
+            }
+        }
 
         Execute.OnUIThread(() => {
             if (needsBeforeSplit)
@@ -1221,28 +1466,11 @@ public class TaskQueueViewModel : Screen
                 createNewCard();
             }
         });
-
-        // 记录日志
-        if (!isEmpty)
-        {
-            switch (color)
-            {
-                case UiLogColor.Error:
-                    _logger.Error("{Content}", content);
-                    break;
-                case UiLogColor.Warning:
-                    _logger.Warning("{Content}", content);
-                    break;
-                default:
-                    _logger.Information("{Content}", content);
-                    break;
-            }
-        }
     }
 
     private void createNewCard()
     {
-        if (LogCardViewModels.Count > 0 && LogCardViewModels[^1].Items.Count <= 0)
+        if (LogCardViewModels.Count > 0 && LogCardViewModels[^1].Items.Count <= 0 && !LogCardViewModels[^1].IsDivider)
         {
             return;
         }
@@ -1252,9 +1480,38 @@ public class TaskQueueViewModel : Screen
     }
 
     /// <summary>
+    /// Inserts a section divider into the log: an <c>hc:Divider</c> card (card log style)
+    /// plus a text line (plain-text log style). By default the plain-text line is
+    /// decorated as "-----{header}-----"; set <paramref name="decoratePlainText"/> to
+    /// <see langword="false"/> to show <paramref name="header"/> verbatim instead.
+    /// Pass <see langword="null"/> for <paramref name="header"/> to insert a plain divider line.
+    /// </summary>
+    /// <param name="header">Optional divider title text.</param>
+    /// <param name="decoratePlainText">Whether to wrap the header as "-----{header}-----"
+    /// in plain-text log style. When <see langword="false"/>, <paramref name="header"/>
+    /// is shown verbatim. Defaults to <see langword="true"/>.</param>
+    public void AddLogSection(string? header = null, bool decoratePlainText = true)
+    {
+        RunningState.Instance.NotifyOutputActivity();
+        _logger.Information("{Header}", header);
+        Execute.OnUIThread(() => {
+            // Plain-text log style: either a decorated "-----{header}-----" line or the header verbatim.
+            var plainText = header is null
+                ? "-----"
+                : decoratePlainText ? $"-----{header}-----" : header;
+            LogItemViewModels.Add(new LogItemViewModel(plainText));
+
+            // Card log style: render a real hc:Divider as its own card.
+            var divider = new LogCardItemViewModel { IsDivider = true, Header = header };
+            LogCardViewModels.Add(divider);
+            createNewCard();
+        });
+    }
+
+    /// <summary>
     /// Clears log.
     /// </summary>
-    private void ClearLog()
+    public void ClearLog()
     {
         Execute.OnUIThread(() => {
             LogItemViewModels.Clear();
@@ -1318,15 +1575,39 @@ public class TaskQueueViewModel : Screen
             new GenericCombinedData<Type> { Display = LocalizationHelper.GetString("Roguelike"), Value = typeof(RoguelikeTask) },
             new GenericCombinedData<Type> { Display = LocalizationHelper.GetString("Reclamation"), Value = typeof(ReclamationTask) },
             new GenericCombinedData<Type> { Display = LocalizationHelper.GetString("UserDataUpdate"), Value = typeof(UserDataUpdateTask) },
+            new GenericCombinedData<Type> { Display = LocalizationHelper.GetString("DepotMaintain"), Value = typeof(DepotMaintainTask) },
+            new GenericCombinedData<Type> { Display = LocalizationHelper.GetString("SwitchTheme"), Value = typeof(SwitchThemeTask) },
             new GenericCombinedData<Type> { Display = LocalizationHelper.GetString("Custom"), Value = typeof(CustomTask) },
         ]);
+
+    private void RefreshTaskTypeListLocalization()
+    {
+        foreach (var item in TaskTypeList)
+        {
+            item.Display = item.Value.Name switch {
+                nameof(StartUpTask) => LocalizationHelper.GetString("StartUp"),
+                nameof(FightTask) => LocalizationHelper.GetString("Fight"),
+                nameof(InfrastTask) => LocalizationHelper.GetString("Infrast"),
+                nameof(RecruitTask) => LocalizationHelper.GetString("Recruit"),
+                nameof(MallTask) => LocalizationHelper.GetString("Mall"),
+                nameof(AwardTask) => LocalizationHelper.GetString("Award"),
+                nameof(RoguelikeTask) => LocalizationHelper.GetString("Roguelike"),
+                nameof(ReclamationTask) => LocalizationHelper.GetString("Reclamation"),
+                nameof(UserDataUpdateTask) => LocalizationHelper.GetString("UserDataUpdate"),
+                nameof(DepotMaintainTask) => LocalizationHelper.GetString("DepotMaintain"),
+                nameof(SwitchThemeTask) => LocalizationHelper.GetString("SwitchTheme"),
+                nameof(CustomTask) => LocalizationHelper.GetString("Custom"),
+                _ => item.Display,
+            };
+        }
+    }
 
     public void AddTaskQueueTask(Type taskName)
     {
         if (Activator.CreateInstance(taskName) is BaseTask task)
         {
             ConfigFactory.CurrentConfig.TaskQueue.Add(task);
-            TaskItemViewModels.Add(new TaskItemViewModel(task.NameDisplay));
+            TaskItemViewModels.Add(new TaskItemViewModel());
             AchievementTrackerHelper.Instance.Unlock(AchievementIds.QueueExpansion);
             AchievementTrackerHelper.Instance.TrackManualTaskAddition(
                 task.TaskType.ToString(),
@@ -1345,14 +1626,14 @@ public class TaskQueueViewModel : Screen
     [UsedImplicitly]
     public void RenameTask(TaskItemViewModel taskItem)
     {
-        if (taskItem == null || !Idle)
+        if (taskItem == null || !_runningState.GetIdle())
         {
             return;
         }
 
         var taskType = ConfigFactory.CurrentConfig.TaskQueue[taskItem.Index].TaskType;
         var currentName = taskItem.Name.Replace("\r", string.Empty).Replace("\n", string.Empty);
-        var dialog = new Views.Dialogs.TextDialogUserControl(
+        var dialog = new Views.Dialogs.TextDialogView(
             LocalizationHelper.GetString("RenameTask") + $" {taskItem.Index + 1}-{LocalizationHelper.GetString(taskType.ToString())}",
             LocalizationHelper.GetString("RenameTaskPrompt"),
             currentName) {
@@ -1367,7 +1648,7 @@ public class TaskQueueViewModel : Screen
             if (taskItem.Index < ConfigFactory.CurrentConfig.TaskQueue.Count)
             {
                 ConfigFactory.CurrentConfig.TaskQueue[taskItem.Index].Name = newName;
-                taskItem.Name = ConfigFactory.CurrentConfig.TaskQueue[taskItem.Index].NameDisplay;
+                taskItem.Name = ConfigFactory.CurrentConfig.TaskQueue[taskItem.Index].NameOrTaskType;
                 AddLog(LocalizationHelper.GetStringFormat("TaskRenamed", newName), UiLogColor.Info);
             }
             else
@@ -1385,7 +1666,7 @@ public class TaskQueueViewModel : Screen
     [UsedImplicitly]
     public async Task RunTaskOnce(TaskItemViewModel taskItem)
     {
-        if (taskItem == null || !Idle)
+        if (taskItem == null || !_runningState.GetIdle())
         {
             return;
         }
@@ -1411,20 +1692,51 @@ public class TaskQueueViewModel : Screen
     }
 
     /// <summary>
+    /// 复制任务
+    /// </summary>
+    /// <param name="taskItem">任务项</param>
+    [UsedImplicitly]
+    public void CopyTask(TaskItemViewModel taskItem)
+    {
+        if (taskItem == null || !_runningState.GetIdle())
+        {
+            return;
+        }
+
+        var index = taskItem.Index;
+        if (index < 0 || index >= ConfigFactory.CurrentConfig.TaskQueue.Count)
+        {
+            return;
+        }
+
+        var oldTask = ConfigFactory.CurrentConfig.TaskQueue[index];
+        var oldTaskJson = JsonSerializer.Serialize(oldTask);
+        if (JsonSerializer.Deserialize(oldTaskJson, oldTask.GetType()) is not BaseTask newTask)
+        {
+            AddLog(LocalizationHelper.GetString("TaskCopyFailed"), UiLogColor.Error);
+            return;
+        }
+        newTask.Name = newTask.NameOrTaskType + " (2)";
+        ConfigFactory.CurrentConfig.TaskQueue.Insert(index + 1, newTask);
+        TaskItemViewModels.Insert(index + 1, new TaskItemViewModel(oldTask.IsEnable));
+        AddLog(LocalizationHelper.GetStringFormat("TaskCopied", newTask.NameOrTaskType), UiLogColor.Info);
+    }
+
+    /// <summary>
     /// 删除任务
     /// </summary>
     /// <param name="taskItem">任务项</param>
     [UsedImplicitly]
     public void RemoveTask(TaskItemViewModel taskItem)
     {
-        if (taskItem == null || !Idle)
+        if (taskItem == null || !_runningState.GetIdle())
         {
             return;
         }
 
         var taskType = ConfigFactory.CurrentConfig.TaskQueue[taskItem.Index].TaskType;
         var result = MessageBoxHelper.Show(
-            string.Format(LocalizationHelper.GetString("ConfirmDeleteTaskMessage"), $"{taskItem.Index + 1}-{LocalizationHelper.GetString(taskType.ToString())}", taskItem.Name),
+            LocalizationHelper.GetStringFormat("ConfirmDeleteTaskMessage", $"{taskItem.Index + 1}-{LocalizationHelper.GetString(taskType.ToString())}", taskItem.Name),
             LocalizationHelper.GetString("ConfirmDeleteTask"),
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -1435,26 +1747,31 @@ public class TaskQueueViewModel : Screen
             if (index < ConfigFactory.CurrentConfig.TaskQueue.Count)
             {
                 TaskItemViewModels.RemoveAt(index);
-                AddLog(string.Format(LocalizationHelper.GetString("TaskDeleted"), taskItem.Name), UiLogColor.Info);
+                AddLog(LocalizationHelper.GetStringFormat("TaskDeleted", taskItem.Name), UiLogColor.Info);
                 AchievementTrackerHelper.Instance.Unlock(AchievementIds.QueueSimplifier);
             }
         }
     }
-
-    private bool _inverseMode = ConfigurationHelper.GetValue(ConfigurationKeys.MainFunctionInverseMode, false);
 
     /// <summary>
     /// Gets or sets a value indicating whether to use inverse mode.
     /// </summary>
     public bool InverseMode
     {
-        get => _inverseMode;
-        set {
-            SetAndNotify(ref _inverseMode, value);
-            InverseShowText = value ? LocalizationHelper.GetString("Inverse") : LocalizationHelper.GetString("Clear");
-            InverseMenuText = value ? LocalizationHelper.GetString("Clear") : LocalizationHelper.GetString("Inverse");
-            ConfigurationHelper.SetValue(ConfigurationKeys.MainFunctionInverseMode, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            RefreshInverseModeText();
+            ConfigFactory.Root.Gui.TaskQueueInverseMode = value;
         }
+    } = ConfigFactory.Root.Gui.TaskQueueInverseMode;
+
+    /// <summary>
+    /// 刷新反选按钮的两个本地化文本（语言切换时调用）。
+    /// </summary>
+    private void RefreshInverseModeText()
+    {
+        InverseShowText = InverseMode ? LocalizationHelper.GetString("Inverse") : LocalizationHelper.GetString("Clear");
+        InverseMenuText = InverseMode ? LocalizationHelper.GetString("Clear") : LocalizationHelper.GetString("Inverse");
     }
 
     /// <summary>
@@ -1462,30 +1779,17 @@ public class TaskQueueViewModel : Screen
     /// </summary>
     public const int SelectedAllWidthWhenBoth = 80;
 
-    private int _selectedAllWidth =
-        ConfigurationHelper.GetGlobalValue(ConfigurationKeys.InverseClearMode, "Clear") == "ClearInverse" ? SelectedAllWidthWhenBoth : 85;
-
     /// <summary>
     /// Gets or sets the width of "Select All".
     /// </summary>
-    public int SelectedAllWidth
-    {
-        get => _selectedAllWidth;
-        set => SetAndNotify(ref _selectedAllWidth, value);
-    }
-
-    private bool _showInverse = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.InverseClearMode, "Clear") == "ClearInverse";
+    public int SelectedAllWidth { get; set => SetAndNotify(ref field, value); } = ConfigFactory.Root.Gui.InverseClearMode == InverseClearType.ClearInverse ? SelectedAllWidthWhenBoth : 85;
 
     /// <summary>
     /// Gets or sets a value indicating whether "Select inversely" is visible.
     /// </summary>
-    public bool ShowInverse
-    {
-        get => _showInverse;
-        set => SetAndNotify(ref _showInverse, value);
-    }
+    public bool ShowInverse { get; set => SetAndNotify(ref field, value); } = ConfigFactory.Root.Gui.InverseClearMode == InverseClearType.ClearInverse;
 
-    private string _inverseShowText = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.MainFunctionInverseMode, bool.FalseString))
+    private string _inverseShowText = ConfigFactory.Root.Gui.TaskQueueInverseMode
         ? LocalizationHelper.GetString("Inverse")
         : LocalizationHelper.GetString("Clear");
 
@@ -1498,7 +1802,7 @@ public class TaskQueueViewModel : Screen
         private set => SetAndNotify(ref _inverseShowText, value);
     }
 
-    private string _inverseMenuText = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.MainFunctionInverseMode, bool.FalseString))
+    private string _inverseMenuText = ConfigFactory.Root.Gui.TaskQueueInverseMode
         ? LocalizationHelper.GetString("Clear")
         : LocalizationHelper.GetString("Inverse");
 
@@ -1545,10 +1849,29 @@ public class TaskQueueViewModel : Screen
         }
         else
         {
-            foreach (var item in TaskItemViewModels)
+            DeselectTasks();
+        }
+    }
+
+    private void DeselectTasks()
+    {
+        if (System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control)
+        {
+            var result = MessageBoxHelper.Show(
+                "Clear all tasks?",
+                "Clear tasks warning!",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (result == MessageBoxResult.Yes)
             {
-                item.IsEnable = false;
+                TaskItemViewModels.Clear();
             }
+
+            return;
+        }
+        foreach (var item in TaskItemViewModels)
+        {
+            item.IsEnable = false;
         }
     }
 
@@ -1598,10 +1921,9 @@ public class TaskQueueViewModel : Screen
         string errMsg = string.Empty;
         bool connected = await Task.Run(() => Instances.AsstProxy.AsstConnect(ref errMsg));
 
-        if (!connected && SettingsViewModel.ConnectSettings.UseAttachWindow)
+        if (!connected && SettingsViewModel.ConnectSettings.IsPCConnectConfig)
         {
             AddLog(errMsg, UiLogColor.Error);
-            _runningState.SetIdle(true);
             SetStopped();
             return false;
         }
@@ -1676,7 +1998,6 @@ public class TaskQueueViewModel : Screen
         }
 
         AddLog(errMsg, UiLogColor.Error);
-        _runningState.SetIdle(true);
         SetStopped();
         return false;
     }
@@ -1724,11 +2045,64 @@ public class TaskQueueViewModel : Screen
     /// <returns>Task</returns>
     public async Task LinkStart()
     {
+        // 调试：按住 Ctrl + Shift 点击 LinkStart，不执行真实任务，改为灌入大量日志以压测日志列表
+#if DEBUG
+        if (System.Windows.Input.Keyboard.Modifiers == (System.Windows.Input.ModifierKeys.Control | System.Windows.Input.ModifierKeys.Shift))
+        {
+            await RunLogVirtualizationStressTestAsync();
+            return;
+        }
+#endif
+
         using var log = new LogScope(_logger);
         await TaskQueueSerializingLock.WaitAsync();
         await LinkStartWithTasks(ConfigFactory.CurrentConfig.TaskQueue);
         TaskQueueSerializingLock.Release();
     }
+
+#if DEBUG
+    /// <summary>
+    /// 日志列表虚拟化压力测试：灌入大量卡片 + 日志 + 缩略图，用于验证滚动/渲染/句柄占用。
+    /// 触发方式：按住 Shift 点击 LinkStart。
+    /// </summary>
+    private async Task RunLogVirtualizationStressTestAsync()
+    {
+        ClearLog();
+        Instances.OverlayViewModel.LogItemsSource = LogItemViewModels;
+
+        const int cardCount = 500;        // 卡片数量
+        const int logsPerCard = 5;        // 每张卡片日志条数
+
+        AddLog(LocalizationHelper.GetString("LinkStart"), UiLogColor.Info, splitMode: LogCardSplitMode.Before);
+
+        for (int i = 1; i <= cardCount; i++)
+        {
+            // 每 10 张卡片前拆分一次，模拟任务边界；并为部分卡片附加缩略图
+            var split = (i % 10 == 1) ? LogCardSplitMode.Before : LogCardSplitMode.None;
+            string[] colors = [UiLogColor.Trace, UiLogColor.Message, UiLogColor.Info, UiLogColor.Warning, UiLogColor.Error];
+            var color = colors[i % 5];
+
+            for (int j = 1; j <= logsPerCard; j++)
+            {
+                AddLog(
+                    $"压力测试日志 #{i}-{j}：这是一条用于验证日志列表虚拟化的长文本，" +
+                    $"请观察滚动流畅度与任务管理器中的用户对象数量变化。",
+                    color,
+                    weight: j == 1 ? "Bold" : "Regular",
+                    splitMode: split);
+                split = LogCardSplitMode.None;  // 仅第一条带 Before
+            }
+
+            // 避免阻塞 UI 线程，每批让出一次
+            if (i % 20 == 0)
+            {
+                await Task.Delay(1).ConfigureAwait(false);
+            }
+        }
+
+        AddLog($"压力测试完成：共生成 {cardCount} 张卡片 × {logsPerCard} 条日志。", UiLogColor.Info, weight: "Bold", splitMode: LogCardSplitMode.Both);
+    }
+#endif
 
     public async Task LinkStartWithTasks(IEnumerable<BaseTask> tasks)
     {
@@ -1740,6 +2114,14 @@ public class TaskQueueViewModel : Screen
 
         _taskStartTime = DateTime.Now;
         ClearLog();
+
+        // Core 资源损坏待修复期间任务不可启动，覆盖热键/托盘/远程等入口（启动自动运行在 AsstProxy 另有前置拦截）
+        if (Bootstrapper.IsResourceBroken)
+        {
+            AddLog(LocalizationHelper.GetString("ResourceBrokenTaskBlocked"), UiLogColor.Error);
+            _logger.Warning("LinkStart blocked: resource broken");
+            return;
+        }
 
         Instances.OverlayViewModel.LogItemsSource = LogItemViewModels;
 
@@ -1753,8 +2135,8 @@ public class TaskQueueViewModel : Screen
         if (maxTimeInterval > 90)
         {
             AddLog(
-                string.Format(
-                    LocalizationHelper.GetString("Achievement.Martian.ConditionsTip"),
+                LocalizationHelper.GetStringFormat(
+                    "Achievement.Martian.ConditionsTip",
                     Math.Round(maxTimeInterval / 30, 1)),
                 UiLogColor.Error);
         }
@@ -1767,11 +2149,21 @@ public class TaskQueueViewModel : Screen
             return;
         }
 
+        // 雷电模拟器 + maatouch 组合存在滑动异常缓慢的问题（滑动持续时间远大于预期），给出警告
+        if (SettingsViewModel.ConnectSettings.ConnectConfig == ConnectConfig.LDPlayer &&
+            SettingsViewModel.ConnectSettings.TouchMode == TouchMode.MaaTouch)
+        {
+            AddLog(LocalizationHelper.GetString("LDPlayerMaaTouchWarning"), UiLogColor.Warning);
+        }
+
+        // GPU 相关提示在每次开始运行时重新输出，避免被 ClearLog 清空
+        Instances.AsstProxy.LogGpuStatus();
+
         MainTasksCompletedCount = 0;
         ResetTaskItemStatuses();
 
-        // 所有提前 return 都要放在 _runningState.SetIdle(false) 之前，否则会导致无法再次点击开始
-        _runningState.SetIdle(false);
+        // 所有提前 return 都要放在进入运行态之前，否则会导致无法再次点击开始
+        _runningState.BeginRun(RunOwner.TaskQueue);
 
         // 虽然更改时已经保存过了，不过保险起见在点击开始之后再次保存任务和基建列表
         // TaskItemSelectionChanged();
@@ -1789,7 +2181,7 @@ public class TaskQueueViewModel : Screen
         */
 
         // 一般是点了“停止”按钮了
-        if (_runningState.Stopping)
+        if (_runningState.GetStopping())
         {
             SetStopped();
             return;
@@ -1801,7 +2193,7 @@ public class TaskQueueViewModel : Screen
         }
 
         // 一般是点了“停止”按钮了
-        if (_runningState.Stopping)
+        if (_runningState.GetStopping())
         {
             SetStopped();
             return;
@@ -1811,13 +2203,15 @@ public class TaskQueueViewModel : Screen
 
         // 直接遍历TaskItemViewModels里面的内容，是排序后的
         int count = 0;
+        List<int> coreTaskIds = [];
+        bool serializeFailed = false;
         foreach (var item in tasks)
         {
             var index = ConfigFactory.CurrentConfig.TaskQueue.IndexOf(item);
             _logger.Information("Index {Index}, Type {TaskType}, Name {TaskName}, IsEnable {IsEnable}",
                 index,
                 item.TaskType,
-                item.NameDisplay,
+                item.NameOrTaskType,
                 item.IsEnable);
             if (!IsTaskEnable(item))
             {
@@ -1832,30 +2226,46 @@ public class TaskQueueViewModel : Screen
                 {
                     case true:
                         ++count;
+                        coreTaskIds.AddRange(taskIds);
                         Instances.TaskQueueViewModel.TaskItemViewModels.ElementAtOrDefault(index)?.SetTaskIds(taskIds);
                         break;
                     case false:
-                        taskRet = false;
-                        AddLog(LocalizationHelper.GetStringFormat("TaskAppend.Error", LocalizationHelper.GetString(item.TaskType.ToString()), item.NameDisplay), UiLogColor.Error);
+                        serializeFailed = true;
+                        AddLog(LocalizationHelper.GetStringFormat("TaskSerialize.Error", LocalizationHelper.GetString(item.TaskType.ToString()), item.NameOrTaskType), UiLogColor.Error);
                         SetTaskStatus(index, TaskItemStatus.Error);
                         break;
                     case null:
-                        AddLog(LocalizationHelper.GetStringFormat("TaskAppend.Skip", LocalizationHelper.GetString(item.TaskType.ToString()), item.NameDisplay), UiLogColor.Info);
+                        AddLog(LocalizationHelper.GetStringFormat("TaskAppend.Skip", LocalizationHelper.GetString(item.TaskType.ToString()), item.NameOrTaskType), UiLogColor.Info);
                         SetTaskStatus(index, TaskItemStatus.Skipped);
                         break;
                 }
             }
             catch (Exception ex)
             {
-                taskRet = false;
-                AddLog(LocalizationHelper.GetStringFormat("TaskAppend.Error", LocalizationHelper.GetString(item.TaskType.ToString()), item.NameDisplay) + "\n" + ex.Message, UiLogColor.Error);
+                serializeFailed = true;
+                AddLog(LocalizationHelper.GetStringFormat("TaskSerialize.Error", LocalizationHelper.GetString(item.TaskType.ToString()), item.NameOrTaskType) + "\n" + ex.Message, UiLogColor.Error);
             }
+        }
+
+        if (serializeFailed)
+        {
+            // 有任务序列化失败则整轮不启动（失败任务已各自记录错误并标记条目），与 AsstStart 失败的 ｢出现未知错误｣ 区分开
+            Instances.AsstProxy.AsstStop();
+            SetStopped();
+            return;
         }
 
         if (count == 0)
         {
             AddLog(LocalizationHelper.GetString("UnselectedTask"));
-            _runningState.SetIdle(true);
+            Instances.AsstProxy.AsstStop();
+            SetStopped();
+            return;
+        }
+
+        if (coreTaskIds.Count == 0)
+        {
+            // 本轮所有任务都不需要 core 执行（例如更新数据仅勾选干员识别且从一图流 OpenAPI 获取），直接收尾
             Instances.AsstProxy.AsstStop();
             SetStopped();
             return;
@@ -1869,6 +2279,7 @@ public class TaskQueueViewModel : Screen
         {
             AddLog(LocalizationHelper.GetString("Running"));
             Instances.AsstProxy.StartTaskTime = DateTimeOffset.Now;
+            SetRunDeadlineFromSettings();
         }
         else
         {
@@ -1901,13 +2312,13 @@ public class TaskQueueViewModel : Screen
 
     public void ManualStop()
     {
-        if (Stopping || _runningState.GetIdle())
+        if (_runningState.GetStopping() || _runningState.GetIdle())
         {
             _logger.Information("Already stopping or idle, return.");
             return;
         }
 
-        _ = Stop();
+        _ = StopManuallyAsync();
         AchievementTrackerHelper.Instance.Unlock(AchievementIds.TacticalRetreat);
 
         if (_taskStartTime is null)
@@ -1923,11 +2334,18 @@ public class TaskQueueViewModel : Screen
     }
 
     /// <summary>
-    /// <para>通常要和 <see cref="SetStopped()"/> 一起使用，除非能保证回调消息能收到 `AsstMsg.TaskChainStopped`</para>
-    /// <para>This is usually done with <see cref="SetStopped()"/> Unless you are guaranteed to receive the callback message `AsstMsg.TaskChainStopped`</para>
+    /// <para>通知 Core 停止当前任务并等待其完成。</para>
+    /// <para>通常 Core 停止后会发送 <c>TaskChainStopped</c> 回调，由 <see cref="AsstProxy"/> 调用 <see cref="SetStopped"/> 恢复 UI 状态。</para>
+    /// <para>若未通过任务链调用 Core（如 Peep），则不会收到回调，需在调用 <see cref="Stop"/> 后手动调用 <see cref="SetStopped"/>。</para>
+    /// <para>超时后会自动调用 <see cref="SetStopped"/> 强制恢复 UI 状态。</para>
+    /// <para>Notifies Core to stop the current task and waits for completion.</para>
+    /// <para>Normally Core sends <c>TaskChainStopped</c> callback after stopping, and <see cref="AsstProxy"/> calls <see cref="SetStopped"/> to reset UI state.</para>
+    /// <para>If Core was not invoked via task chain (e.g. Peep), no callback will be received; caller must manually call <see cref="SetStopped"/> after calling <see cref="Stop"/>.</para>
+    /// <para>On timeout, <see cref="SetStopped"/> is called automatically to force-reset UI state.</para>
     /// </summary>
     /// <param name="timeout">Timeout millisecond</param>
-    /// <returns>A <see cref="Task"/>
+    /// <returns>
+    /// 是否在超时内确认 Core 停止；<see langword="false"/> 表示超时后由强制收口恢复。
     /// <para>尝试等待 core 成功停止运行，默认超时时间一分钟</para>
     /// <para>Try to wait for the core to stop running, the default timeout is one minute</para>
     /// </returns>
@@ -1949,7 +2367,16 @@ public class TaskQueueViewModel : Screen
             count++;
         }
 
-        return !Instances.AsstProxy.AsstRunning();
+        if (Instances.AsstProxy.AsstRunning())
+        {
+            // 超时：Core 未在超时内停止，强制恢复 UI 状态
+            _logger.Warning("Stop timeout, force resetting UI state");
+            AddLog(LocalizationHelper.GetString("StopTimeout") + "\n" + LocalizationHelper.GetString("RestartRecommendation"), UiLogColor.Error);
+            SetStopped();
+            return false;
+        }
+
+        return true;
     }
 
     // UI 绑定的方法
@@ -1958,15 +2385,8 @@ public class TaskQueueViewModel : Screen
     {
         Waiting = true;
         AddLog(LocalizationHelper.GetString("Waiting"));
-        if (RoguelikeTask.RoguelikeDelayAbortUntilCombatComplete)
-        {
-            await WaitUntilRoguelikeCombatComplete();
-
-            if (Instances.AsstProxy.AsstRunning() && !_runningState.GetStopping())
-            {
-                await Stop();
-            }
-        }
+        await WaitUntilRoguelikeCombatComplete();
+        await StopManuallyAsync();
     }
 
     /// <summary>
@@ -1975,7 +2395,7 @@ public class TaskQueueViewModel : Screen
     private async Task WaitUntilRoguelikeCombatComplete()
     {
         int time = 0;
-        while (RoguelikeTask.RoguelikeDelayAbortUntilCombatComplete && RoguelikeInCombatAndShowWait && time < 600 && !Stopping)
+        while (RoguelikeTask.RoguelikeDelayAbortUntilCombatComplete && RoguelikeInCombatAndShowWait && time < 600 && !_runningState.GetStopping())
         {
             await Task.Delay(1000);
             ++time;
@@ -1984,14 +2404,86 @@ public class TaskQueueViewModel : Screen
 
     public bool RoguelikeInCombatAndShowWait { get => field; set => SetAndNotify(ref field, value); }
 
-    public void SetStopped()
+    // 手动停止的结束脚本发射权，每轮运行开始（离开空闲）时重置；多个手动入口并发时保证只发射一次
+    private int _stopScriptLaunched;
+
+    /// <summary>
+    /// 按 Interlocked 标志去重地执行一次结束脚本（EndsWithScript）。手动停止各入口与自然完成
+    /// 回调共享发射权，手动停止与自然完成赛跑时只执行一次。
+    /// </summary>
+    /// <param name="showLog">是否在任务日志记录脚本执行。</param>
+    /// <returns>Task</returns>
+    public async Task RunStopScriptOnceAsync(bool showLog = true)
     {
-        SleepManagement.AllowSleep();
-        if (SettingsViewModel.GameSettings.ManualStopWithScript)
+        if (Interlocked.CompareExchange(ref _stopScriptLaunched, 1, 0) is not 0)
         {
-            Task.Run(() => SettingsViewModel.GameSettings.RunScript("EndsWithScript"));
+            return;
         }
 
+        await Task.Run(() => SettingsViewModel.GameSettings.RunScript("EndsWithScript", showLog));
+    }
+
+    /// <summary>
+    /// 手动停止核心：等待 Core 停止、UI 状态恢复（TaskChainStopped 回调，或 Stop 超时强制）后，
+    /// 按运行归属发射结束脚本——非 copilot 须 ｢手动停止时启用上述脚本｣ 开启，
+    /// copilot 还须 ｢自动战斗时启用上述脚本｣ 同时开启。归属在开始入口声明，跨页停止也能正确判定。
+    /// 所有手动语义入口（手动停止 / 等待并停止 / 时长上限 / 热键 / 远控 StopTask / 各页停止按钮）收敛到此；
+    /// 非手动场景（异常停止、挤停、启动失败等）直接调用 <see cref="Stop"/> 与 <see cref="SetStopped"/>，不发射脚本。
+    /// </summary>
+    /// <returns>是否完整走完本次手动停止（等到空闲且未被新一轮运行抢占）；false 时调用方不应再执行后续动作。</returns>
+    public async Task<bool> StopManuallyAsync()
+    {
+        if (_runningState.GetStopping() || _runningState.GetIdle())
+        {
+            return false;
+        }
+
+        // 归属 None（连接测试、单独等模拟器等非任务语境的运行）不发射结束脚本
+        var owner = _runningState.Owner;
+        var runScript = owner != RunOwner.None
+            && SettingsViewModel.GameSettings.ManualStopWithScript
+            && (owner != RunOwner.Copilot || SettingsViewModel.GameSettings.CopilotWithScript);
+
+        // 等 Idle 是等「本次停止完成」：Stop() 正常出口不置 Idle（收口归异步在途的 TaskChainStopped 回调）；
+        // 启动链路进行中点停止则要等链路走到下一个 Stopping 检查点（模拟器等待等环节每秒检查，通常秒级，
+        // 开始前脚本阶段则要等脚本跑完、可任意长）；超时出口已自行强制置位，此处立即通过。
+        // timeout 不针对现有场景（均有收口方），仅防御未来出现无收口方的情况
+        var stoppedWithinTimeout = await Stop();
+        if (!await _runningState.UntilIdleAsync(confirmTimes: 0, timeout: 600_000))
+        {
+            _logger.Warning("Manual stop: idle not reached before wait limit, skip stop script");
+            return false;
+        }
+
+        // 等待窗口内新一轮可能已开始，放弃本次发射；Stop() 超时强制收口时 Core 挂死仍在运行，仍应发射，
+        // 用是否超时区分这两种 AsstRunning == true 的情况
+        if (stoppedWithinTimeout && Instances.AsstProxy.AsstRunning())
+        {
+            return false;
+        }
+
+        if (runScript)
+        {
+            await RunStopScriptOnceAsync();
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// 重置 UI 状态为已停止（仅重置状态，不执行结束脚本；脚本发射归 <see cref="StopManuallyAsync"/> 与自然完成回调）。
+    /// </summary>
+    /// <returns>是否实际执行了状态重置（false 表示被幂等保护跳过）。</returns>
+    public bool SetStopped()
+    {
+        // 幂等保护：已经空闲且不在停止中，跳过
+        // 防止超时 SetStopped 后 Core 延迟回调再次触发导致打断新任务
+        if (_runningState.GetIdle() && !_runningState.GetStopping())
+        {
+            return false;
+        }
+
+        SleepManagement.AllowSleep();
         if (!_runningState.GetIdle() || _runningState.GetStopping())
         {
             AddLog(LocalizationHelper.GetString("Stopped"), splitMode: LogCardSplitMode.Both);
@@ -2001,42 +2493,15 @@ public class TaskQueueViewModel : Screen
         _runningState.SetStopping(false);
         _runningState.SetIdle(true);
 
-        // 只抑制“本轮任务期间”的自动开启；任务结束后应允许下一轮自动开启 LiveView。
+        return true;
     }
 
     public bool EnableSetFightParams { get; set; } = true;
 
-    public bool Inited { get => field; set => SetAndNotify(ref field, value); }
-
-    private bool _idle;
-
     /// <summary>
-    /// Gets or sets a value indicating whether it is idle.
+    /// Gets the shared run control state for run-state bindings.
     /// </summary>
-    public bool Idle
-    {
-        get => _idle;
-        set {
-            SetAndNotify(ref _idle, value);
-            if (!value)
-            {
-                return;
-            }
-
-            UpdateMainTasksProgress(0);
-        }
-    }
-
-    private bool _stopping;
-
-    /// <summary>
-    /// Gets a value indicating whether `stop` is awaiting.
-    /// </summary>
-    public bool Stopping
-    {
-        get => _stopping;
-        private set => SetAndNotify(ref _stopping, value);
-    }
+    public RunControlState Run => RunControlState.Instance;
 
     private bool _waiting;
 
@@ -2122,15 +2587,6 @@ public class TaskQueueViewModel : Screen
             {
                 yield return instance;
             }
-        }
-    }
-
-    public static void InvokeProcSubTaskMsg(AsstMsg msg, JObject details)
-    {
-        foreach (var instance in _taskViewModelTypes)
-        {
-            // 调用 ProcSubTaskMsg 方法
-            instance.ProcSubTaskMsg(msg, details);
         }
     }
 

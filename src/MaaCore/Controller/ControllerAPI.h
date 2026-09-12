@@ -19,6 +19,12 @@ enum class ControllerType
     Win32,
 #endif
     MaaFwAdb,
+#if ASST_WITH_EMULATOR_EXTRAS
+    Mumu,
+#endif
+#ifdef __ANDROID__
+    MaaFwAndroidNative,
+#endif
 };
 
 class ControllerAPI
@@ -52,7 +58,7 @@ public:
         const Point& p1,
         const Point& p2,
         int duration = 0,
-        bool extra_swipe = false,
+        SwipeExtraDirection extra_swipe = SwipeExtraDirection::None,
         double slope_in = 1,
         double slope_out = 1,
         bool with_pause = false) = 0;
@@ -69,6 +75,8 @@ public:
     ControllerAPI& operator=(ControllerAPI&&) = delete;
 
     virtual void back_to_home() noexcept {}
+
+    virtual void set_main_screen_recognition(bool /*on*/) {}
 };
 
 struct InputEvent

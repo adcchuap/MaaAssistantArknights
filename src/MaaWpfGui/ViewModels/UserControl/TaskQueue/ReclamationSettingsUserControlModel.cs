@@ -16,7 +16,9 @@ using System.Collections.Generic;
 using System.Linq;
 using MaaWpfGui.Configuration.Single.MaaTask;
 using MaaWpfGui.Helper;
+using MaaWpfGui.Models;
 using MaaWpfGui.Models.AsstTasks;
+using MaaWpfGui.Utilities;
 using MaaWpfGui.Utilities.ValueType;
 using MaaWpfGui.ViewModels.UI;
 using static MaaWpfGui.Main.AsstProxy;
@@ -30,6 +32,7 @@ public class ReclamationSettingsUserControlModel : TaskSettingsViewModel, Reclam
     static ReclamationSettingsUserControlModel()
     {
         Instance = new();
+        LocalizationHelper.LanguageChanged += Instance.RefreshLocalization;
     }
 
     public static ReclamationSettingsUserControlModel Instance { get; }
@@ -37,11 +40,10 @@ public class ReclamationSettingsUserControlModel : TaskSettingsViewModel, Reclam
     /// <summary>
     /// Gets the list of reclamation themes.
     /// </summary>
-    public List<GenericCombinedData<Theme>> ReclamationThemeList { get; } =
-        [
-            new() { Display = $"{LocalizationHelper.GetString("ReclamationThemeFire")} ({LocalizationHelper.GetString("ClosedStage")})", Value = Theme.Fire },
-            new() { Display = LocalizationHelper.GetString("ReclamationThemeTales"), Value = Theme.Tales },
-        ];
+    public LocalizedObservableList<Theme> ReclamationThemeList { get; } = new(
+        (Theme.Fire, "ReclamationThemeFire", "ClosedStage"),
+        (Theme.Tales, "ReclamationThemeTales", null),
+        (Theme.RelaunchAnchor, "ReclamationThemeRelaunchAnchor", null));
 
     /// <summary>
     /// Gets or sets 生息演算主题["Tales"].
@@ -49,32 +51,51 @@ public class ReclamationSettingsUserControlModel : TaskSettingsViewModel, Reclam
     public Theme ReclamationTheme
     {
         get => GetTaskConfig<ReclamationTask>().Theme;
-        set => SetTaskConfig<ReclamationTask>(t => t.Theme == value, t => t.Theme = value);
+        set {
+            if (SetTaskConfig<ReclamationTask>(t => t.Theme == value, t => t.Theme = value))
+            {
+                RefreshModeList();
+                if (value == Theme.RelaunchAnchor)
+                {
+                    ReclamationClearStore = false;
+                }
+
+                // 主题变更后刷新高级设置可见性
+                TaskSettingVisibilityInfo.Instance.RefreshAdvancedSettingsVisibility();
+            }
+        }
+    }
+
+    public void RefreshModeList()
+    {
+        var mode = ReclamationMode;
+        if (ReclamationTheme == Theme.Tales)
+        {
+            ModeList = [
+                new() { Display = LocalizationHelper.GetString("ReclamationModeProsperityNoSave"), Value = Mode.ProsperityNoSave },
+                new() { Display = LocalizationHelper.GetString("ReclamationModeProsperityInSave"), Value = Mode.ProsperityInSave },
+            ];
+        }
+        else if (ReclamationTheme == Theme.RelaunchAnchor)
+        {
+            ModeList = [
+                new() { Display = LocalizationHelper.GetString("ReclamationModeRA1"), Value = Mode.RA1 },
+                new() { Display = LocalizationHelper.GetString("ReclamationModeRA4"), Value = Mode.RA4 },
+                new() { Display = LocalizationHelper.GetString("ReclamationModeRA15"), Value = Mode.RA15 },
+            ];
+        }
+        ReclamationMode = ModeList.Any(x => x.Value == mode) ? mode : ModeList.FirstOrDefault()?.Value ?? default;
     }
 
     /// <summary>
-    /// Gets the list of reclamation modes.
+    /// Gets 生息演算模式列表
     /// </summary>
-    public List<GenericCombinedData<Mode>> ReclamationModeList { get; } =
-        [
-            new() { Display = LocalizationHelper.GetString("ReclamationModeProsperityNoSave"), Value = Mode.NoArchive },
-            new() { Display = LocalizationHelper.GetString("ReclamationModeProsperityInSave"), Value = Mode.Archive },
-        ];
+    public List<GenericCombinedData<Mode>> ModeList { get => field; private set => SetAndNotify(ref field, value); } = [];
 
     /// <summary>
-    /// Gets or sets 策略，无存档刷生息点数 / 有存档刷生息点数
-    /// 可用值包括：
-    /// <list type="bullet">
-    ///     <item>
-    ///         <term><c>0</c></term>
-    ///         <description>无存档时通过进出关卡刷生息点数</description>
-    ///     </item>
-    ///     <item>
-    ///         <term><c>1</c></term>
-    ///         <description>有存档时通过合成支援道具刷生息点数</description>
-    ///     </item>
-    /// </list>
+    /// Gets or sets 生息演算模式（含义由主题决定）
     /// </summary>
+    [PropertyDependsOn(nameof(ReclamationTheme))]
     public Mode ReclamationMode
     {
         get => GetTaskConfig<ReclamationTask>().Mode;
@@ -96,11 +117,9 @@ public class ReclamationSettingsUserControlModel : TaskSettingsViewModel, Reclam
     /// <summary>
     /// Gets the list of reclamation increment modes.
     /// </summary>
-    public List<GenericCombinedData<int>> ReclamationIncrementModeList { get; } =
-        [
-            new() { Display = LocalizationHelper.GetString("ReclamationIncrementModeClick"), Value = 0 },
-            new() { Display = LocalizationHelper.GetString("ReclamationIncrementModeHold"), Value = 1 },
-        ];
+    public LocalizedObservableList<int> ReclamationIncrementModeList { get; } = new(
+        (0, "ReclamationIncrementModeClick"),
+        (1, "ReclamationIncrementModeHold"));
 
     /// <summary>
     /// Gets or sets 点击类型：0 连点；1 长按
@@ -129,10 +148,51 @@ public class ReclamationSettingsUserControlModel : TaskSettingsViewModel, Reclam
         set => SetTaskConfig<ReclamationTask>(t => t.ClearStore == value, t => t.ClearStore = value);
     }
 
+    /// <summary>
+    /// Gets the theme-specific tip text.
+    /// </summary>
+    [PropertyDependsOn(nameof(ReclamationTheme), nameof(ReclamationMode))]
+    public string ReclamationTip
+    {
+        get {
+            var theme = ReclamationTheme;
+            var mode = ReclamationMode;
+
+            switch (theme)
+            {
+                case Theme.Fire:
+                    return LocalizationHelper.GetString("ReclamationTipFire");
+                case Theme.RelaunchAnchor:
+                    {
+                        // mode 0 = RA-1, mode 1 = RA-4, mode 2 = RA-15
+                        var stageNum = mode switch
+                        {
+                            Mode.RA15 => 15,
+                            Mode.RA4 => 4,
+                            _ => 1,
+                        };
+                        var stageTipKey = $"ReclamationTipRelaunchAnchorRA{stageNum}";
+                        if (LocalizationHelper.TryGetString(stageTipKey, out var stageTip))
+                        {
+                            return stageTip;
+                        }
+
+                        return LocalizationHelper.GetString("ReclamationTipRelaunchAnchorRA1");
+                    }
+
+                case Theme.Tales:
+                    return LocalizationHelper.GetString("ReclamationTipTales");
+                default:
+                    return string.Empty;
+            }
+        }
+    }
+
     public override void RefreshUI(BaseTask baseTask)
     {
         if (baseTask is ReclamationTask)
         {
+            RefreshModeList();
             Refresh();
         }
     }
@@ -151,7 +211,7 @@ public class ReclamationSettingsUserControlModel : TaskSettingsViewModel, Reclam
             var toolToCraft = !string.IsNullOrEmpty(reclamation.ToolToCraft) ? reclamation.ToolToCraft : LocalizationHelper.GetString("ReclamationToolToCraftPlaceholder", DataHelper.ClientLanguageMapper[SettingsViewModel.GameSettings.ClientType]);
             var task = new AsstReclamationTask() {
                 Theme = reclamation.Theme,
-                Mode = reclamation.Mode,
+                Mode = (int)reclamation.Mode,
                 IncrementMode = reclamation.IncrementMode,
                 MaxCraftCountPerRound = reclamation.MaxCraftCountPerRound,
                 ToolToCraft = [.. toolToCraft.Split(';').Select(s => s.Trim())],
@@ -164,5 +224,15 @@ public class ReclamationSettingsUserControlModel : TaskSettingsViewModel, Reclam
                 _ => (null, []),
             };
         }
+    }
+
+    /// <summary>
+    /// 刷新构造时缓存的本地化列表文本。
+    /// </summary>
+    private void RefreshLocalization()
+    {
+        ReclamationThemeList.RefreshLocalization();
+        RefreshModeList();
+        ReclamationIncrementModeList.RefreshLocalization();
     }
 }

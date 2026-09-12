@@ -20,13 +20,13 @@ using System.IO;
 using System.Linq;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using System.Text.Unicode;
 using System.Threading;
 using System.Threading.Tasks;
 using MaaWpfGui.Configuration.Converter;
+using MaaWpfGui.Configuration.Converter.Specific;
 using MaaWpfGui.Configuration.Single;
 using MaaWpfGui.Configuration.Single.MaaTask;
 using MaaWpfGui.Helper;
@@ -62,7 +62,9 @@ public static class ConfigFactory
     // ReSharper disable once EventNeverSubscribedTo.Global
     public static event ConfigurationUpdateEventHandler? ConfigurationUpdateEvent;
 
-    private static readonly JsonSerializerOptions _options = new() { WriteIndented = true, Converters = { new FightTaskStageResetModeConverter(), new InvalidEnumValueRemoveConverter(), new JsonStringEnumConverter(), new FightTaskStageResetModeInvalidToIgnoreConverter() }, Encoder = JavaScriptEncoder.Create(UnicodeRanges.All), DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { JsonPredictSerializationModifier.Modify } } };
+    private static readonly JsonSerializerOptions _options = new() { WriteIndented = true, Converters = { new DiscordWebhookFixConverter(), new GlobalGuiRenameConverter(), new ThirdPartyMigrationConverter(), new RecruitTaskHoldTagsConverter(), new FightTaskStageResetModeConverter(), new FaultTolerantRootConverter(), new TolerantEnumConverterFactory(), new FightTaskStageResetModeInvalidToIgnoreConverter() }, Encoder = JavaScriptEncoder.Create(UnicodeRanges.All), DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { JsonPredictSerializationModifier.Modify } } };
+
+    private static readonly List<string> _brokenConfigs = [];
 
     // TODO: 参考 ConfigurationHelper ，拆几个函数出来
     private static readonly Lazy<Root> _rootConfig = new(() => {
@@ -118,9 +120,11 @@ public static class ConfigFactory
             {
                 _logger.Information("Failed to load configuration file, creating a new one");
                 parsed = new Root();
+                parsed.Configurations.Add(parsed.Current, new SpecificConfig());
             }
 
-            parsed.PropertyChanged += OnPropertyChangedFactory("Root.");
+            parsed.PropertyChanged += Handler.OnPropertyChangedFactory("Root.");
+            parsed.EventBinding("Root.");
             parsed.Configurations.CollectionChanged += (in NotifyCollectionChangedEventArgs<KeyValuePair<string, SpecificConfig>> args) => {
                 switch (args.Action)
                 {
@@ -150,11 +154,6 @@ public static class ConfigFactory
                 OnPropertyChanged("Root.Configurations." + args.NewItem.Key, args.OldItem.Value, args.NewItem.Value);
             };
 
-            parsed.Timers.CollectionChanged += OnCollectionChangedFactory<int, Global.Timer>("Root.Timers.");
-            parsed.VersionUpdate.PropertyChanged += OnPropertyChangedFactory();
-            parsed.AnnouncementInfo.PropertyChanged += OnPropertyChangedFactory();
-            parsed.GUI.PropertyChanged += OnPropertyChangedFactory();
-
             foreach (var keyValue in parsed.Configurations)
             {
                 SpecificConfigBind(keyValue.Key, keyValue.Value);
@@ -169,23 +168,10 @@ public static class ConfigFactory
                 _logger.Warning("{File} save failed", _configBakFile);
             }
 
-            if (ParseJsonFile(ConfigurationHelper.ConfigFile) is JsonObject oldConfigJson && oldConfigJson["Configurations"] is JsonObject configurationsObj)
-            {
-                if (oldConfigJson["Current"]?.GetValue<string>() is string oldCurrent && parsed.Current != oldCurrent)
-                {
-                    _logger.Warning("Current configuration in old configuration is {OldCurrent}, but in new configuration is {NewCurrent}, switching to old current", oldCurrent, parsed.Current);
-                    parsed.Current = oldCurrent;
-                }
-                var configNames = configurationsObj.Select(i => i.Key);
-                foreach (var name in parsed.Configurations.Select(i => i.Key).Except(configNames))
-                {
-                    parsed.Configurations.Remove(name);
-                    _logger.Information("Configuration {ConfigName} does not exist in old configuration, remove it", name);
-                }
-            }
-
+            // 检查当前配置是否存在，如果不存在则补上新的配置
             if (parsed.Configurations.All(i => i.Key != parsed.Current))
             {
+                _brokenConfigs.Add(parsed.Current);
                 parsed.Configurations.Add(parsed.Current, new SpecificConfig());
             }
 
@@ -194,10 +180,7 @@ public static class ConfigFactory
             void SpecificConfigBind(string name, SpecificConfig config)
             {
                 var key = "Root.Configurations." + name + ".";
-                config.PropertyChanged += OnPropertyChangedFactory(key);
-                config.DragItemIsChecked.CollectionChanged += OnCollectionChangedFactory<string, bool>(key + nameof(SpecificConfig.DragItemIsChecked) + ".");
-                config.InfrastOrder.CollectionChanged += OnCollectionChangedFactory<string, int>(key + nameof(SpecificConfig.InfrastOrder) + ".");
-
+                config.EventBinding(key);
                 config.TaskQueue.CollectionChanged += (in NotifyCollectionChangedEventArgs<BaseTask> args) => {
                     switch (args.Action)
                     {
@@ -205,13 +188,13 @@ public static class ConfigFactory
                         case NotifyCollectionChangedAction.Replace:
                             if (args.IsSingleItem)
                             {
-                                args.NewItem.PropertyChanged += TaskQueueItemOnPropertyChangedFactory(config.TaskQueue, key);
+                                args.NewItem.PropertyChanged += Handler.TaskQueueItemOnPropertyChangedFactory(config.TaskQueue, key);
                             }
                             else
                             {
                                 foreach (var value in args.NewItems)
                                 {
-                                    value.PropertyChanged += TaskQueueItemOnPropertyChangedFactory(config.TaskQueue, key);
+                                    value.PropertyChanged += Handler.TaskQueueItemOnPropertyChangedFactory(config.TaskQueue, key);
                                 }
                             }
                             OnPropertyChanged($"({args.Action}){key}TaskQueue[{args.NewStartingIndex}]", args.OldItem, args.NewItem);
@@ -229,88 +212,96 @@ public static class ConfigFactory
                 };
                 foreach (var task in config.TaskQueue)
                 {
-                    task.PropertyChanged += TaskQueueItemOnPropertyChangedFactory(config.TaskQueue, key);
+                    task.PropertyChanged += Handler.TaskQueueItemOnPropertyChangedFactory(config.TaskQueue, key);
                 }
-            }
-
-            JsonObject? ParseJsonFile(string filePath)
-            {
-                if (File.Exists(filePath) is false)
-                {
-                    return null;
-                }
-
-                var str = File.ReadAllText(filePath);
-                try
-                {
-                    var obj = JsonSerializer.Deserialize<JsonObject>(str);
-                    return obj ?? throw new Exception("Failed to parse json file");
-                }
-                catch (Exception ex)
-                {
-                    _logger.Error(ex, "Failed to deserialize json file: {FilePath}", filePath);
-                }
-
-                return null;
             }
         }
     });
 
-    private static PropertyChangedEventHandler OnPropertyChangedFactory(string key, object? oldValue, object? newValue)
+    public static string? ConsumePendingRecoveryMessage()
     {
-        return (o, args) => {
-            var after = newValue;
-            if (after == null && args is PropertyChangedEventDetailArgs detailArgs)
-            {
-                after = detailArgs.NewValue;
-            }
+        if (_brokenConfigs.Count == 0)
+        {
+            return null;
+        }
 
-            OnPropertyChanged(key + args.PropertyName, oldValue, after);
-        };
+        var messages = LocalizationHelper.GetStringFormat("ConfigurationRecoveredNotification", string.Join(", ", _brokenConfigs));
+        _brokenConfigs.Clear();
+        return messages;
     }
 
-    private static PropertyChangedEventHandler OnPropertyChangedFactory(string key = "")
+    public static class Handler
     {
-        return (o, args) => {
-            object? oldValue = null;
-            object? newValue = null;
-            if (args is PropertyChangedEventDetailArgs detailArgs)
-            {
-                oldValue = detailArgs.OldValue;
-                newValue = detailArgs.NewValue;
-            }
+        public static PropertyChangedEventHandler OnPropertyChangedFactory(string key, object? oldValue, object? newValue)
+        {
+            return (o, args) => {
+                var after = newValue;
+                if (after == null && args is PropertyChangedEventDetailArgs detailArgs)
+                {
+                    after = detailArgs.NewValue;
+                }
 
-            OnPropertyChanged(key + o?.GetType().Name + "." + args.PropertyName, oldValue, newValue);
-        };
-    }
+                OnPropertyChanged(key + args.PropertyName, oldValue, after);
+            };
+        }
 
-    private static PropertyChangedEventHandler TaskQueueItemOnPropertyChangedFactory(ObservableList<BaseTask> taskQueue, string key = "")
-    {
-        return (o, args) => {
-            object? oldValue = null;
-            object? newValue = null;
-            if (args is PropertyChangedEventDetailArgs detailArgs)
-            {
-                oldValue = detailArgs.OldValue;
-                newValue = detailArgs.NewValue;
-            }
+        public static PropertyChangedEventHandler OnPropertyChangedFactory(string key = "")
+        {
+            return (o, args) => {
+                object? oldValue = null;
+                object? newValue = null;
+                if (args is PropertyChangedEventDetailArgs detailArgs)
+                {
+                    oldValue = detailArgs.OldValue;
+                    newValue = detailArgs.NewValue;
+                }
 
-            int index = -1;
-            var taskName = string.Empty;
-            if (o is BaseTask task)
-            {
-                index = taskQueue.IndexOf(task);
-                taskName = task.Name;
-            }
-            OnPropertyChanged($"{key}[{index}]{taskName}({o?.GetType().Name})." + args.PropertyName, oldValue, newValue);
-        };
-    }
+                OnPropertyChanged(key + args.PropertyName, oldValue, newValue);
+            };
+        }
 
-    private static NotifyCollectionChangedEventHandler<KeyValuePair<T1, T2>> OnCollectionChangedFactory<T1, T2>(string key)
-    {
-        return (in NotifyCollectionChangedEventArgs<KeyValuePair<T1, T2>> args) => {
-            OnPropertyChanged(key + args.NewItem.Key, args.OldItem.Value, args.NewItem.Value);
-        };
+        public static PropertyChangedEventHandler TaskQueueItemOnPropertyChangedFactory(ObservableList<BaseTask> taskQueue, string key = "")
+        {
+            return (o, args) => {
+                object? oldValue = null;
+                object? newValue = null;
+                if (args is PropertyChangedEventDetailArgs detailArgs)
+                {
+                    oldValue = detailArgs.OldValue;
+                    newValue = detailArgs.NewValue;
+                }
+
+                int index = -1;
+                var taskName = string.Empty;
+                if (o is BaseTask task)
+                {
+                    index = taskQueue.IndexOf(task);
+                    taskName = task.Name;
+                }
+                OnPropertyChanged($"{key}[{index}]{taskName}({o?.GetType().Name})." + args.PropertyName, oldValue, newValue);
+            };
+        }
+
+        public static NotifyCollectionChangedEventHandler OnCollectionChangedFactory<T>(string key)
+        {
+            return (object? sender, NotifyCollectionChangedEventArgs e) => {
+                OnPropertyChanged(key + $"[{e.NewStartingIndex}].", e.OldItems?.Count > 0 ? e.OldItems : null, e.NewItems?.Count > 0 ? e.NewItems : null);
+            };
+        }
+
+        public static NotifyCollectionChangedEventHandler<T> OnObservableChangedFactory<T>(string key)
+        {
+            return (in NotifyCollectionChangedEventArgs<T> e) => {
+                OnPropertyChanged(key + $"[{e.NewStartingIndex}]", e.OldItem, e.NewItem);
+            };
+        }
+
+        public static NotifyCollectionChangedEventHandler<KeyValuePair<T1, T2>> OnCollectionChangedFactory<T1, T2>(string key)
+        {
+            return (in NotifyCollectionChangedEventArgs<KeyValuePair<T1, T2>> args) => {
+                OnPropertyChanged(key + args.NewItem.Key, args.OldItem.Value, args.NewItem.Value);
+            };
+        }
     }
 
     // ReSharper disable once MemberCanBePrivate.Global
@@ -323,7 +314,7 @@ public static class ConfigFactory
         _debounceTimer.Change(PendingDelayMs, Timeout.Infinite);
 
         ConfigurationUpdateEvent?.Invoke(key, oldValue, newValue);
-        _logger.Debug("Configuration {Key} has been set: `{OldValue}` -> `{NewValue}`, save scheduled", key, oldValue, newValue);
+        _logger.Information("Configuration {Key} has been set: `{OldValue}` -> `{NewValue}`, save scheduled", key, oldValue, newValue);
     }
 
     private static void CreateSaveTask(object? state)
@@ -353,19 +344,20 @@ public static class ConfigFactory
 
     private static bool Save(string? file = null, Root? root = null)
     {
-        lock (_lock)
+        _semaphore.Wait();
+        try
         {
-            try
-            {
-                File.WriteAllText(file ?? ConfigFile, JsonSerializer.Serialize(root ?? Root, _options));
-            }
-            catch (Exception e)
-            {
-                _logger.Error(e, "Failed to save configuration file.");
-                return false;
-            }
-
+            File.WriteAllText(file ?? ConfigFile, JsonSerializer.Serialize(root ?? Root, _options));
             return true;
+        }
+        catch (Exception e)
+        {
+            _logger.Error(e, "Failed to save configuration file.");
+            return false;
+        }
+        finally
+        {
+            _semaphore.Release();
         }
     }
 
@@ -398,16 +390,13 @@ public static class ConfigFactory
             _logger.Information("Waiting for save task to complete");
             _saveTask.Wait();
         }
-        lock (_lock)
+        if (Save())
         {
-            if (Save())
-            {
-                _logger.Information("{File} saved", ConfigFile);
-            }
-            else
-            {
-                _logger.Warning("{File} save failed", ConfigFile);
-            }
+            _logger.Information("{File} saved", ConfigFile);
+        }
+        else
+        {
+            _logger.Warning("{File} save failed", ConfigFile);
         }
     }
 
@@ -422,6 +411,13 @@ public static class ConfigFactory
         Root.Current = configName;
         return true;
     }
+
+    /// <summary>
+    /// 检查指定名称的配置是否存在。
+    /// </summary>
+    /// <param name="configName">配置名称</param>
+    /// <returns>存在则返回 <c>true</c>，否则返回 <c>false</c></returns>
+    public static bool ConfigurationExists(string configName) => Root.Configurations.ContainsKey(configName);
 
     public static bool AddConfiguration(string configName, string? copyFrom = null)
     {
@@ -472,7 +468,7 @@ public static class ConfigFactory
         return true;
     }
 
-    public static List<string> ConfigList
+    public static List<string> ConfigKeys
     {
         get {
             var lists = new List<string>(Root.Configurations.Count);

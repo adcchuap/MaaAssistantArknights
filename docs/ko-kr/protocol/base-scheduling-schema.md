@@ -11,7 +11,9 @@ icon: material-symbols:view-quilt-rounded
 JSON 파일은 주석을 지원하지 않으므로, 텍스트 내의 주석은 예시용입니다. 직접 복사하여 사용하지 마세요.
 :::
 
-[기반시설 스케줄링 생성 도구](https://ark.yituliu.cn/tools/schedule)
+[기반시설 스케줄링 생성 도구](https://ark.yituliu.cn/tools/scheduleV3)
+
+[기반시설 스케줄 자동 생성 도구](https://riic.autos/)
 
 ## 전체 필드 목록
 
@@ -137,6 +139,6 @@ JSON 파일은 주석을 지원하지 않으므로, 텍스트 내의 주석은 �
 
 ## 예시
 
-[243 극한 효율, 하루 3회 교대](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/243_layout_3_times_a_day.json)
+[243 극한 효율, 하루 3회 교대](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/243_layout_3_times_a_day.json)
 
-[153 극한 효율, 하루 3회 교대](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/153_layout_3_times_a_day.json)
+[153 극한 효율, 하루 3회 교대](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/153_layout_3_times_a_day.json)

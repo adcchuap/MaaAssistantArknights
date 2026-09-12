@@ -16,27 +16,35 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Documents;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using HandyControl.Controls;
 using JetBrains.Annotations;
+using MaaWpfGui.Configuration.Factory;
 using MaaWpfGui.Constants;
+using MaaWpfGui.Constants.Enums;
 using MaaWpfGui.Extensions;
 using MaaWpfGui.Helper;
 using MaaWpfGui.Main;
 using MaaWpfGui.Models;
 using MaaWpfGui.Models.AsstTasks;
+using MaaWpfGui.Services.Web;
 using MaaWpfGui.States;
 using MaaWpfGui.Utilities;
 using MaaWpfGui.Utilities.ValueType;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ObservableCollections;
 using Serilog;
 using Stylet;
 using Timer = System.Timers.Timer;
@@ -60,51 +68,54 @@ public class ToolboxViewModel : Screen
         DisplayName = LocalizationHelper.GetString("Toolbox");
         _runningState = RunningState.Instance;
         _runningState.StateChanged += (__, e) => {
-            Idle = e.Idle;
-            Inited = e.Inited;
-            Stopping = e.Stopping;
+            if (e.NewState.Idle)
+            {
+                PixelPaintParametersLocked = false;
+            }
 
-            if (e.Stopping && Peeping && !IsPeepTransitioning)
+            if (e.NewState.Stopping && Peeping && !IsPeepTransitioning)
             {
                 _ = Peep();
             }
         };
         _peepImageTimer.Elapsed += PeepImageTimerElapsed;
+
+        // 本类型由 Stylet IoC 容器管理，全应用生命周期唯一实例，订阅后无需取消订阅
+        LocalizationHelper.LanguageChanged += () => {
+            DisplayName = LocalizationHelper.GetString("Toolbox");
+            RecruitInfo = LocalizationHelper.GetString("RecruitmentRecognitionTip");
+            PixelPaintFitModeList.RefreshLocalization();
+            PixelPaintDitherModeList.RefreshLocalization();
+            SecretFrontEventList.RefreshLocalization();
+            Application.Current.Dispatcher.InvokeAsync(
+                () => {
+                    LoadDepotDetails();
+                    ClearOperBoxRecognitionData();
+                    LoadOperBoxDetails();
+                },
+                DispatcherPriority.Loaded);
+        };
+        SettingsViewModel.GuiSettings.OperNameLanguageChanged += () => {
+            Application.Current.Dispatcher.InvokeAsync(() => {
+                ClearOperBoxRecognitionData();
+                LoadOperBoxDetails();
+            }, DispatcherPriority.Loaded);
+        };
         _peepImageTimer.Interval = 1000d / PeepTargetFps;
         _gachaTimer.Tick += RefreshGachaTip;
         LoadDepotDetails();
         LoadOperBoxDetails();
+        InitializeDepotRowPresentation();
+        InitializeOperBoxRowPresentation();
         OperBoxSelectedIndex = OperBoxNotHaveList.Count > 0 ? 0 : 1;
 
         UpdateMiniGameTaskList();
     }
 
-    private bool _idle;
-
     /// <summary>
-    /// Gets or sets a value indicating whether it is idle.
+    /// Gets the shared run control state for run-state bindings.
     /// </summary>
-    public bool Idle
-    {
-        get => _idle;
-        set => SetAndNotify(ref _idle, value);
-    }
-
-    private bool _inited;
-
-    public bool Inited
-    {
-        get => _inited;
-        set => SetAndNotify(ref _inited, value);
-    }
-
-    private bool _stopping;
-
-    public bool Stopping
-    {
-        get => _stopping;
-        set => SetAndNotify(ref _stopping, value);
-    }
+    public RunControlState Run => RunControlState.Instance;
 
     #region Recruit
 
@@ -220,50 +231,44 @@ public class ToolboxViewModel : Screen
     /// </summary>
     public bool ChooseLevel3
     {
-        get => field;
-        set {
+        get; set {
             SetAndNotify(ref field, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ChooseLevel3, value.ToString());
+            ConfigFactory.CurrentConfig.Toolbox.ChooseLevel3 = value;
         }
-    } = ConfigurationHelper.GetValue(ConfigurationKeys.ChooseLevel3, true);
+    } = ConfigFactory.CurrentConfig.Toolbox.ChooseLevel3;
 
     /// <summary>
     /// Gets or sets a value indicating whether to choose level 4.
     /// </summary>
     public bool ChooseLevel4
     {
-        get => field;
-        set {
+        get; set {
             SetAndNotify(ref field, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ChooseLevel4, value.ToString());
+            ConfigFactory.CurrentConfig.Toolbox.ChooseLevel4 = value;
         }
-    } = ConfigurationHelper.GetValue(ConfigurationKeys.ChooseLevel4, true);
+    } = ConfigFactory.CurrentConfig.Toolbox.ChooseLevel4;
 
     /// <summary>
     /// Gets or sets a value indicating whether to choose level 5.
     /// </summary>
     public bool ChooseLevel5
     {
-        get => field;
-        set {
+        get; set {
             SetAndNotify(ref field, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ChooseLevel5, value.ToString());
+            ConfigFactory.CurrentConfig.Toolbox.ChooseLevel5 = value;
         }
-    } = ConfigurationHelper.GetValue(ConfigurationKeys.ChooseLevel5, true);
-
-    private bool _chooseLevel6 = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.ChooseLevel6, bool.TrueString));
+    } = ConfigFactory.CurrentConfig.Toolbox.ChooseLevel5;
 
     /// <summary>
     /// Gets or sets a value indicating whether to choose level 6.
     /// </summary>
     public bool ChooseLevel6
     {
-        get => _chooseLevel6;
-        set {
-            SetAndNotify(ref _chooseLevel6, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ChooseLevel6, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Toolbox.ChooseLevel6 = value;
         }
-    }
+    } = ConfigFactory.CurrentConfig.Toolbox.ChooseLevel6;
 
     [PropertyDependsOn(nameof(ChooseLevel3Time))]
     public int ChooseLevel3Hour
@@ -281,17 +286,16 @@ public class ToolboxViewModel : Screen
 
     public int ChooseLevel3Time
     {
-        get => field;
-        set {
+        get; set {
             value = value switch {
                 < 60 => 9 * 60,
                 > 9 * 60 => 60,
                 _ => value / 10 * 10,
             };
             SetAndNotify(ref field, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ToolBoxChooseLevel3Time, value.ToString());
+            ConfigFactory.CurrentConfig.Toolbox.ChooseLevel3Time = value;
         }
-    } = ConfigurationHelper.GetValue(ConfigurationKeys.ToolBoxChooseLevel3Time, 540);
+    } = ConfigFactory.CurrentConfig.Toolbox.ChooseLevel3Time;
 
     [PropertyDependsOn(nameof(ChooseLevel4Time))]
     public int ChooseLevel4Hour
@@ -309,59 +313,27 @@ public class ToolboxViewModel : Screen
 
     public int ChooseLevel4Time
     {
-        get => field;
-        set {
+        get; set {
             value = value switch {
                 < 60 => 9 * 60,
                 > 9 * 60 => 60,
                 _ => value / 10 * 10,
             };
             SetAndNotify(ref field, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ToolBoxChooseLevel4Time, value.ToString());
+            ConfigFactory.CurrentConfig.Toolbox.ChooseLevel4Time = value;
         }
-    } = ConfigurationHelper.GetValue(ConfigurationKeys.ToolBoxChooseLevel4Time, 540);
-
-    [PropertyDependsOn(nameof(ChooseLevel5Time))]
-    public int ChooseLevel5Hour
-    {
-        get => ChooseLevel5Time / 60;
-        set => ChooseLevel5Time = (value * 60) + ChooseLevel5Min;
-    }
-
-    [PropertyDependsOn(nameof(ChooseLevel5Time))]
-    public int ChooseLevel5Min
-    {
-        get => (ChooseLevel5Time % 60) / 10 * 10;
-        set => ChooseLevel5Time = (ChooseLevel5Hour * 60) + value;
-    }
-
-    public int ChooseLevel5Time
-    {
-        get => field;
-        set {
-            value = value switch {
-                < 60 => 9 * 60,
-                > 9 * 60 => 60,
-                _ => value / 10 * 10,
-            };
-            SetAndNotify(ref field, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.ToolBoxChooseLevel5Time, value.ToString());
-        }
-    } = ConfigurationHelper.GetValue(ConfigurationKeys.ToolBoxChooseLevel5Time, 540);
-
-    private bool _autoSetTime = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.AutoSetTime, bool.TrueString));
+    } = ConfigFactory.CurrentConfig.Toolbox.ChooseLevel4Time;
 
     /// <summary>
     /// Gets or sets a value indicating whether to set time automatically.
     /// </summary>
     public bool RecruitAutoSetTime
     {
-        get => _autoSetTime;
-        set {
-            SetAndNotify(ref _autoSetTime, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.AutoSetTime, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Toolbox.AutoSetTime = value;
         }
-    }
+    } = ConfigFactory.CurrentConfig.Toolbox.AutoSetTime;
 
     /// <summary>
     /// Starts calculation.
@@ -373,7 +345,7 @@ public class ToolboxViewModel : Screen
     {
         string errMsg = string.Empty;
         RecruitInfo = LocalizationHelper.GetString("ConnectingToEmulator");
-        _runningState.SetIdle(false);
+        _runningState.BeginRun(RunOwner.Toolbox);
         var recruitCaught = await Task.Run(() => Instances.AsstProxy.AsstConnect(ref errMsg));
         if (!recruitCaught)
         {
@@ -412,7 +384,6 @@ public class ToolboxViewModel : Screen
             SetRecruitTime = RecruitAutoSetTime,
             ChooseLevel3Time = ChooseLevel3Time,
             ChooseLevel4Time = ChooseLevel4Time,
-            ChooseLevel5Time = ChooseLevel5Time,
             ServerType = Instances.SettingsViewModel.ServerType,
         };
         var (type, taskParams) = task.Serialize();
@@ -420,16 +391,13 @@ public class ToolboxViewModel : Screen
         ret &= Instances.AsstProxy.AsstStart();
     }
 
-    private bool _recruitmentShowPotential = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.RecruitmentShowPotential, bool.TrueString));
-
     public bool RecruitmentShowPotential
     {
-        get => _recruitmentShowPotential;
-        set {
-            SetAndNotify(ref _recruitmentShowPotential, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.RecruitmentShowPotential, value.ToString());
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Toolbox.ShowPotential = value;
         }
-    }
+    } = ConfigFactory.CurrentConfig.Toolbox.ShowPotential;
 
     public void ProcRecruitMsg(JObject details)
     {
@@ -497,19 +465,41 @@ public class ToolboxViewModel : Screen
         }
     }
 
-    private ObservableCollection<DepotResultDate> _depotResult = [];
+    private const int DepotRowSize = 5;
+
+    private ObservableList<DepotResultDate> _depotResult = [];
 
     /// <summary>
     /// Gets or sets the depot result.
     /// </summary>
-    public ObservableCollection<DepotResultDate> DepotResult
+    public ObservableList<DepotResultDate> DepotResult
     {
         get => _depotResult;
         set {
+            if (ReferenceEquals(_depotResult, value))
+            {
+                RefreshDepotRows();
+                InvalidateDepotCache();
+                return;
+            }
+
+            _depotResult.CollectionChanged -= DepotResultCollectionChanged;
             SetAndNotify(ref _depotResult, value);
+            _depotResult.CollectionChanged += DepotResultCollectionChanged;
+            RefreshDepotRows();
             InvalidateDepotCache();
         }
     }
+
+    private ObservableCollection<ObservableCollection<DepotResultDate>> _depotRows = [];
+
+    public ObservableCollection<ObservableCollection<DepotResultDate>> DepotRows
+    {
+        get => _depotRows;
+        private set => SetAndNotify(ref _depotRows, value);
+    }
+
+    public int DepotColumnCount => GetColumnCount(DepotResult.Count, DepotRowSize);
 
     // 缓存相关字段
     private bool _depotCacheInvalid = true;
@@ -535,7 +525,7 @@ public class ToolboxViewModel : Screen
         _cachedLoliconResult = null;
     }
 
-    public class DepotResultDate
+    public class DepotResultDate : IComparable<DepotResultDate>
     {
         public string? Name { get; set; }
 
@@ -552,6 +542,51 @@ public class ToolboxViewModel : Screen
         /// Gets 格式化后的显示数量（用于 UI 绑定）
         /// </summary>
         public string? DisplayCount => Count >= 0 ? Count.FormatNumber(false) : null;
+
+        /// <summary>
+        /// 创建后懒加载缓存的 sortId，避免每次比较都查字典。
+        /// </summary>
+        private int? _cachedSortId;
+
+        private int SortId => _cachedSortId ??=
+            ItemListHelper.ArkItems != null &&
+            ItemListHelper.ArkItems.TryGetValue(Id, out var item)
+                ? item.SortId
+                : int.MaxValue;
+
+        /// <summary>
+        /// 按游戏内置 sortId 排序（值越小越靠前），查不到的按 ID 文本兜底。
+        /// </summary>
+        /// <param name="other">要比较的另一个 DepotResultDate 对象</param>
+        /// <returns>比较结果</returns>
+        public int CompareTo(DepotResultDate? other)
+        {
+            if (other is null)
+            {
+                return 1;
+            }
+
+            if (SortId != other.SortId)
+            {
+                return SortId.CompareTo(other.SortId);
+            }
+
+            return string.Compare(Id, other.Id, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private void InitializeDepotRowPresentation()
+    {
+        _depotResult.CollectionChanged += DepotResultCollectionChanged;
+        RefreshDepotRows();
+    }
+
+    private void DepotResultCollectionChanged(in NotifyCollectionChangedEventArgs<DepotResultDate> e) => RefreshDepotRows();
+
+    private void RefreshDepotRows()
+    {
+        DepotRows = BuildRows(DepotResult, DepotRowSize);
+        NotifyOfPropertyChange(nameof(DepotColumnCount));
     }
 
     /// <summary>
@@ -740,27 +775,24 @@ public class ToolboxViewModel : Screen
             }
         }
 
-        // 转换为 DepotResult，按 ID 排序
-        foreach (var kvp in depotItems.OrderBy(x => x.Key))
+        // 构建结果并检查成就，按游戏内置 sortId 排序
+        var results = depotItems.Select(kvp => new DepotResultDate {
+            Id = kvp.Key,
+            Name = ItemListHelper.GetItemName(kvp.Key),
+            Image = ItemListHelper.GetItemImage(kvp.Key),
+            Count = kvp.Value,
+        }).OrderBy(r => r);
+
+        foreach (var result in results)
         {
-            var id = kvp.Key;
-            var count = kvp.Value;
-
-            DepotResultDate result = new() {
-                Id = id,
-                Name = ItemListHelper.GetItemName(id),
-                Image = ItemListHelper.GetItemImage(id),
-                Count = count,
-            };
-
-            if (count > 0 &&
-                count > AchievementTrackerHelper.Instance.GetProgress(AchievementIds.WarehouseMiser))
+            if (result.Count > 0 &&
+                result.Count > AchievementTrackerHelper.Instance.GetProgress(AchievementIds.WarehouseMiser))
             {
-                AchievementTrackerHelper.Instance.SetProgress(AchievementIds.WarehouseMiser, count);
+                AchievementTrackerHelper.Instance.SetProgress(AchievementIds.WarehouseMiser, result.Count);
             }
-
-            DepotResult.Add(result);
         }
+
+        DepotResult.AddRange(results);
 
         // 标记缓存失效
         InvalidateDepotCache();
@@ -795,15 +827,96 @@ public class ToolboxViewModel : Screen
     }
 
     /// <summary>
+    /// 仓库导出格式
+    /// </summary>
+    public enum DepotExportFormat
+    {
+        /// <summary>
+        /// https://github.com/penguin-statistics/ArkPlanner
+        /// </summary>
+        Arkplanner = 0,
+
+        /// <summary>
+        /// https://arkntools.app/#/material
+        /// </summary>
+        Lolicon = 1,
+
+        /// <summary>
+        /// Specifies that the content is formatted using Markdown syntax.
+        /// </summary>
+        Markdown = 2,
+
+        /// <summary>
+        /// Specifies that the content is formatted as comma-separated values (CSV).
+        /// </summary>
+        Csv = 3,
+    }
+
+    /// <summary>
+    /// 干员BOX导出格式
+    /// </summary>
+    public enum OperBoxExportFormat
+    {
+        /// <summary>
+        /// Represents the clipboard as a data source or destination.
+        /// </summary>
+        Clipboard = 0,
+
+        /// <summary>
+        /// Specifies that the content type is JSON format.
+        /// </summary>
+        Json = 1,
+
+        /// <summary>
+        /// Specifies that the content is formatted using Markdown syntax.
+        /// </summary>
+        Markdown = 2,
+
+        /// <summary>
+        /// Specifies that the data format is comma-separated values (CSV).
+        /// </summary>
+        Csv = 3,
+    }
+
+    public record struct ExportEntry(string Display, int Value);
+
+    public List<ExportEntry> ExportOptionList { get; } = [
+        new(LocalizationHelper.GetString("ExportToArkplanner"), (int)DepotExportFormat.Arkplanner),
+        new(LocalizationHelper.GetString("ExportToLolicon"), (int)DepotExportFormat.Lolicon),
+        new(LocalizationHelper.GetString("ExportToMarkdown"), (int)DepotExportFormat.Markdown),
+        new(LocalizationHelper.GetString("ExportToCsv"), (int)DepotExportFormat.Csv),
+    ];
+
+    private int _selectedExportValue;
+
+    public int SelectedExportValue
+    {
+        get => _selectedExportValue;
+        set => SetAndNotify(ref _selectedExportValue, value);
+    }
+
+    [UsedImplicitly]
+    public void ExecuteSelectedExport()
+    {
+        switch ((DepotExportFormat)_selectedExportValue)
+        {
+            case DepotExportFormat.Arkplanner: ExportToArkplanner(); break;
+            case DepotExportFormat.Lolicon: ExportToLolicon(); break;
+            case DepotExportFormat.Markdown: ExportToMarkdown(); break;
+            case DepotExportFormat.Csv: ExportToCsv(); break;
+        }
+    }
+
+    /// <summary>
     /// Export depot info to ArkPlanner.
     /// UI 绑定的方法
     /// </summary>
     [UsedImplicitly]
     public void ExportToArkplanner()
     {
-        System.Windows.Forms.Clipboard.Clear();
-        System.Windows.Forms.Clipboard.SetDataObject(ArkPlannerResult);
-        DepotInfo = LocalizationHelper.GetString("CopiedToClipboard");
+        Clipboard.Clear();
+        Clipboard.SetDataObject(ArkPlannerResult);
+        Growl.Info(LocalizationHelper.GetString("CopiedToClipboard"));
     }
 
     /// <summary>
@@ -813,9 +926,82 @@ public class ToolboxViewModel : Screen
     [UsedImplicitly]
     public void ExportToLolicon()
     {
-        System.Windows.Forms.Clipboard.Clear();
-        System.Windows.Forms.Clipboard.SetDataObject(LoliconResult);
-        DepotInfo = LocalizationHelper.GetString("CopiedToClipboard");
+        Clipboard.Clear();
+        Clipboard.SetDataObject(LoliconResult);
+        Growl.Info(LocalizationHelper.GetString("CopiedToClipboard"));
+    }
+
+    /// <summary>
+    /// Export depot info to Markdown file.
+    /// UI 绑定的方法
+    /// </summary>
+    [UsedImplicitly]
+    public void ExportToMarkdown()
+    {
+        ExportDepot(BuildMarkdownExportLines, "Markdown files (*.md)|*.md|All files (*.*)|*.*", ".md", "Arknights_Depot_Export.md");
+    }
+
+    /// <summary>
+    /// Export depot info to CSV file.
+    /// UI 绑定的方法
+    /// </summary>
+    [UsedImplicitly]
+    public void ExportToCsv()
+    {
+        ExportDepot(BuildCsvExportLines, "CSV files (*.csv)|*.csv|All files (*.*)|*.*", ".csv", "Arknights_Depot_Export.csv");
+    }
+
+    private void ExportDepot(Func<IReadOnlyList<DepotResultDate>, IEnumerable<string>> lineBuilder, string filter, string defaultExt, string defaultFileName)
+    {
+        var items = DepotResult.Where(item => item.Count >= 0).ToList();
+        if (items.Count == 0)
+        {
+            return;
+        }
+
+        var content = string.Join(Environment.NewLine, lineBuilder(items));
+
+        var dialog = new Microsoft.Win32.SaveFileDialog {
+            Filter = filter,
+            DefaultExt = defaultExt,
+            FileName = defaultFileName,
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        File.WriteAllText(dialog.FileName, content);
+        Growl.Info(LocalizationHelper.GetString("ExportedToFile"));
+    }
+
+    private static IEnumerable<string> BuildMarkdownExportLines(IReadOnlyList<DepotResultDate> items)
+    {
+        var lines = new List<string> { "# Arknights Depot Export", string.Empty, "| ID | Name | Count |", "| --- | --- | --- |" };
+        foreach (var item in items)
+        {
+            lines.Add($"| {item.Id} | {item.Name ?? string.Empty} | {item.Count} |");
+        }
+
+        return lines;
+    }
+
+    private static IEnumerable<string> BuildCsvExportLines(IReadOnlyList<DepotResultDate> items)
+    {
+        var lines = new List<string> { "ID,Name,Count" };
+        foreach (var item in items)
+        {
+            var name = item.Name ?? string.Empty;
+            if (name.Contains(',') || name.Contains('"') || name.Contains('\n'))
+            {
+                name = "\"" + name.Replace("\"", "\"\"") + "\"";
+            }
+
+            lines.Add($"{item.Id},{name},{item.Count}");
+        }
+
+        return lines;
     }
 
     /*
@@ -831,9 +1017,6 @@ public class ToolboxViewModel : Screen
     [
         "3401", // 家具
         "3112", "3113", "3114", // 碳
-        "4001", // 龙门币
-        "4003", // 合成玉
-        "4006", // 红票
         "5001", // 经验
     ];
 
@@ -920,13 +1103,8 @@ public class ToolboxViewModel : Screen
         // 如果有更新，重新排序并保存
         if (hasUpdates)
         {
-            // 按 ID 排序（与 DepotParse 保持一致）
-            var sortedItems = DepotResult.OrderBy(x => x.Id).ToList();
-            DepotResult.Clear();
-            foreach (var item in sortedItems)
-            {
-                DepotResult.Add(item);
-            }
+            // 按游戏内置 sortId 排序
+            DepotResult.Sort();
 
             // 标记缓存失效
             InvalidateDepotCache();
@@ -973,7 +1151,7 @@ public class ToolboxViewModel : Screen
     [UsedImplicitly]
     public async Task StartDepot()
     {
-        _runningState.SetIdle(false);
+        _runningState.BeginRun(RunOwner.Toolbox);
         string errMsg = string.Empty;
         DepotInfo = LocalizationHelper.GetString("ConnectingToEmulator");
         bool caught = await Task.Run(() => Instances.AsstProxy.AsstConnect(ref errMsg));
@@ -1061,7 +1239,8 @@ public class ToolboxViewModel : Screen
         }
     }
 
-    public class Operator(string id, string name, int rarity, int elite = 0, int level = 0, int potential = 0)
+    public class Operator(string id, string name, int rarity, int elite = 0, int level = 0, int potential = 0,
+        List<OperBoxData.SkillData>? skills = null, List<OperBoxData.EquipData>? equips = null)
     {
         [JsonProperty("id")]
         public string Id { get; } = id;
@@ -1080,6 +1259,18 @@ public class ToolboxViewModel : Screen
 
         [JsonProperty("potential")]
         public int Potential { get; } = potential;
+
+        /// <summary>
+        /// Gets 技能专精，仅从一图流 OpenAPI 获取的数据有值
+        /// </summary>
+        [JsonProperty("skills", NullValueHandling = NullValueHandling.Ignore)]
+        public List<OperBoxData.SkillData>? Skills { get; } = skills;
+
+        /// <summary>
+        /// Gets 模组，仅从一图流 OpenAPI 获取的数据有值
+        /// </summary>
+        [JsonProperty("equips", NullValueHandling = NullValueHandling.Ignore)]
+        public List<OperBoxData.EquipData>? Equips { get; } = equips;
 
         public int IdNumber { get; } = ExtractIdNumber(id);
 
@@ -1142,27 +1333,119 @@ public class ToolboxViewModel : Screen
         }
     }
 
+    private const int OperBoxRowSize = 5;
+
     private ObservableCollection<Operator> _operBoxHaveList = [];
 
     public ObservableCollection<Operator> OperBoxHaveList
     {
         get => _operBoxHaveList;
-        set => SetAndNotify(ref _operBoxHaveList, value);
+        set {
+            if (ReferenceEquals(_operBoxHaveList, value))
+            {
+                RefreshOperBoxHaveRows();
+                return;
+            }
+
+            _operBoxHaveList.CollectionChanged -= OperBoxHaveListCollectionChanged;
+            SetAndNotify(ref _operBoxHaveList, value);
+            _operBoxHaveList.CollectionChanged += OperBoxHaveListCollectionChanged;
+            RefreshOperBoxHaveRows();
+        }
     }
+
+    private ObservableCollection<ObservableCollection<Operator>> _operBoxHaveRows = [];
+
+    public ObservableCollection<ObservableCollection<Operator>> OperBoxHaveRows
+    {
+        get => _operBoxHaveRows;
+        private set => SetAndNotify(ref _operBoxHaveRows, value);
+    }
+
+    public int OperBoxHaveColumnCount => GetColumnCount(OperBoxHaveList.Count, OperBoxRowSize);
 
     private ObservableCollection<Operator> _operBoxNotHaveList = [];
 
     public ObservableCollection<Operator> OperBoxNotHaveList
     {
         get => _operBoxNotHaveList;
-        set => SetAndNotify(ref _operBoxNotHaveList, value);
+        set {
+            if (ReferenceEquals(_operBoxNotHaveList, value))
+            {
+                RefreshOperBoxNotHaveRows();
+                return;
+            }
+
+            _operBoxNotHaveList.CollectionChanged -= OperBoxNotHaveListCollectionChanged;
+            SetAndNotify(ref _operBoxNotHaveList, value);
+            _operBoxNotHaveList.CollectionChanged += OperBoxNotHaveListCollectionChanged;
+            RefreshOperBoxNotHaveRows();
+        }
     }
 
-    private void SaveOperBoxDetails(List<OperBoxData.OperData> details)
+    private ObservableCollection<ObservableCollection<Operator>> _operBoxNotHaveRows = [];
+
+    public ObservableCollection<ObservableCollection<Operator>> OperBoxNotHaveRows
+    {
+        get => _operBoxNotHaveRows;
+        private set => SetAndNotify(ref _operBoxNotHaveRows, value);
+    }
+
+    public int OperBoxNotHaveColumnCount => GetColumnCount(OperBoxNotHaveList.Count, OperBoxRowSize);
+
+    private void InitializeOperBoxRowPresentation()
+    {
+        _operBoxHaveList.CollectionChanged += OperBoxHaveListCollectionChanged;
+        _operBoxNotHaveList.CollectionChanged += OperBoxNotHaveListCollectionChanged;
+        RefreshOperBoxHaveRows();
+        RefreshOperBoxNotHaveRows();
+    }
+
+    private void OperBoxHaveListCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        RefreshOperBoxHaveRows();
+    }
+
+    private void OperBoxNotHaveListCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        RefreshOperBoxNotHaveRows();
+    }
+
+    private void RefreshOperBoxHaveRows()
+    {
+        OperBoxHaveRows = BuildRows(OperBoxHaveList, OperBoxRowSize);
+        NotifyOfPropertyChange(nameof(OperBoxHaveColumnCount));
+    }
+
+    private void RefreshOperBoxNotHaveRows()
+    {
+        OperBoxNotHaveRows = BuildRows(OperBoxNotHaveList, OperBoxRowSize);
+        NotifyOfPropertyChange(nameof(OperBoxNotHaveColumnCount));
+    }
+
+    private static ObservableCollection<ObservableCollection<T>> BuildRows<T>(IEnumerable<T> items, int rowSize)
+    {
+        ObservableCollection<ObservableCollection<T>> rows = [];
+
+        foreach (var row in items.Chunk(rowSize))
+        {
+            rows.Add(new ObservableCollection<T>(row));
+        }
+
+        return rows;
+    }
+
+    private static int GetColumnCount(int count, int rowSize)
+    {
+        return count <= 0 ? 1 : Math.Min(count, rowSize);
+    }
+
+    private void SaveOperBoxDetails(List<OperBoxData.OperData> details, string source)
     {
         var data = new JObject {
             ["done"] = true,
             ["own_opers"] = JArray.FromObject(details),
+            ["source"] = source,
         };
 
         if (LastOperBoxSyncTime.HasValue)
@@ -1199,7 +1482,6 @@ public class ToolboxViewModel : Screen
     {
         // TODO: 删除老数据节省 gui.json 的大小，后续版本可以删除
         // var json = ConfigurationHelper.GetValue(ConfigurationKeys.OperBoxData, string.Empty);
-        ConfigurationHelper.DeleteValue(ConfigurationKeys.OperBoxData);
         var json = JsonDataHelper.Get(JsonDataKey.OperBoxData, string.Empty);
         if (string.IsNullOrWhiteSpace(json))
         {
@@ -1237,7 +1519,7 @@ public class ToolboxViewModel : Screen
             var operDataMap = ownOpers.ToDictionary(o => o.Id);
             foreach (var (id, oper) in DataHelper.Operators)
             {
-                if (!DataHelper.IsCharacterAvailableInClient(oper, SettingsViewModel.GameSettings.ClientType))
+                if (!DataHelper.IsCharacterAvailableInClient(oper, SettingsViewModel.GameSettings.ClientType.ToCustomString()))
                 {
                     continue;
                 }
@@ -1261,6 +1543,11 @@ public class ToolboxViewModel : Screen
             SortOperBoxLists();
         }
     }
+
+    /// <summary>
+    /// 干员识别数据的来源（local 或 yituliu），决定导出时是否包含专精/模组字段
+    /// </summary>
+    private string _operBoxDataSource = "local";
 
     /// <summary>
     /// 每次传进来的都是完整数据, 临时缓存去重
@@ -1305,6 +1592,8 @@ public class ToolboxViewModel : Screen
             ResetOperBoxRecognitionState();
         }
 
+        _operBoxDataSource = details["source"]?.ToString() == "yituliu" ? "yituliu" : "local";
+
         var ownOpers = (details["own_opers"] as JArray)?.ToObject<List<OperBoxData.OperData>>()?.Where(o => !string.IsNullOrEmpty(o.Id)).ToList();
         if (ownOpers is null)
         {
@@ -1316,7 +1605,7 @@ public class ToolboxViewModel : Screen
             if (_tempOperHaveSet.Add(oper.Id))
             {
                 var name = DataHelper.GetLocalizedCharacterName(DataHelper.Operators.FirstOrDefault(i => i.Key == oper.Id).Value) ?? "???";
-                OperBoxHaveList.Add(new Operator(oper.Id, name, oper.Rarity, oper.Elite, oper.Level, oper.Potential));
+                OperBoxHaveList.Add(new Operator(oper.Id, name, oper.Rarity, oper.Elite, oper.Level, oper.Potential, oper.Skills, oper.Equips));
                 if (oper.Id == "char_485_pallas")
                 {
                     AchievementTrackerHelper.Instance.Unlock(AchievementIds.WarehouseKeeper);
@@ -1332,7 +1621,7 @@ public class ToolboxViewModel : Screen
 
         foreach (var (id, oper) in DataHelper.Operators)
         {
-            if (!_tempOperHaveSet.Contains(id) && DataHelper.IsCharacterAvailableInClient(oper, SettingsViewModel.GameSettings.ClientType))
+            if (!_tempOperHaveSet.Contains(id) && DataHelper.IsCharacterAvailableInClient(oper, SettingsViewModel.GameSettings.ClientType.ToCustomString()))
             {
                 var name = DataHelper.GetLocalizedCharacterName(oper) ?? "???";
                 OperBoxNotHaveList.Add(new Operator(id, name, oper.Rarity));
@@ -1360,8 +1649,8 @@ public class ToolboxViewModel : Screen
             }
         }
 
-        OperBoxInfo = $"{LocalizationHelper.GetString("IdentificationCompleted")}\n{LocalizationHelper.GetString("OperBoxRecognitionTip")}";
-        SaveOperBoxDetails(ownOpers);
+        OperBoxInfo = $"{LocalizationHelper.GetString("IdentificationCompleted")}  {LocalizationHelper.GetString("OperBoxRecognitionTip")}";
+        SaveOperBoxDetails(ownOpers, _operBoxDataSource);
         _tempOperHaveSet = [];
         return true;
     }
@@ -1392,15 +1681,132 @@ public class ToolboxViewModel : Screen
     }
 
     /// <summary>
-    /// 开始识别干员
+    /// 从一图流 OpenAPI 拉取干员练度数据并按识别结果填充，不依赖模拟器连接。
+    /// 拉取失败只报错不回退 core 本地识别：开关开着是用户显式选择，静默回退会突然要求连接模拟器，无人值守队列下不可预期。
+    /// 拉取成功后才重置旧识别数据，失败时保留；运行状态（Idle）由调用方负责收尾。
+    /// </summary>
+    /// <returns>是否成功。</returns>
+    public async Task<bool> StartOperBoxFromYituliuApiAsync()
+    {
+        var token = SettingsViewModel.ThirdPartyServiceSettings.YituliuOpenApiToken.Trim();
+        if (string.IsNullOrEmpty(token))
+        {
+            OperBoxInfo = LocalizationHelper.GetString("YituliuTokenEmpty");
+            Instances.TaskQueueViewModel.AddLog(OperBoxInfo, UiLogColor.Error);
+            return false;
+        }
+
+        OperBoxInfo = LocalizationHelper.GetString("OperBoxFetchingFromYituliu");
+
+        try
+        {
+            var (result, data) = await YituliuApiService.GetOperatorInfoAsync(token);
+            if (result != YituliuApiService.TokenValidationResult.Valid || data is null)
+            {
+                var reason = result switch {
+                    YituliuApiService.TokenValidationResult.WriteOnly => LocalizationHelper.GetString("YituliuTokenWriteOnly"),
+                    YituliuApiService.TokenValidationResult.Invalid => LocalizationHelper.GetString("YituliuTokenInvalid"),
+                    _ => LocalizationHelper.GetString("YituliuTokenNetworkError"),
+                };
+                OperBoxInfo = LocalizationHelper.GetStringFormat("YituliuFetchFailed", reason);
+                Instances.TaskQueueViewModel.AddLog(OperBoxInfo, UiLogColor.Error);
+                return false;
+            }
+
+            var details = ConvertYituliuDataToDetails(data);
+            if ((details["own_opers"] as JArray) is not { Count: > 0 })
+            {
+                // 账号未绑定或未导入练度时接口返回空列表（本地资源过旧跳过全部干员时同样为空），此时保留本地数据，不落盘覆盖
+                OperBoxInfo = LocalizationHelper.GetString("YituliuNoOperBoxData");
+                Instances.TaskQueueViewModel.AddLog(OperBoxInfo, UiLogColor.Error);
+                return false;
+            }
+
+            // 拉取成功后才清空内存中的旧识别数据与同步时间，失败时原样保留
+            ResetOperBoxRecognitionState();
+            return OperBoxParse(details, updateSyncTime: true);
+        }
+        catch (Exception e)
+        {
+            _logger.Error("Failed to load operator box from yituliu open-api: {Message}", e.Message);
+            OperBoxInfo = LocalizationHelper.GetString("YituliuTokenNetworkError");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 将一图流 OpenAPI 返回的干员数据转换为 <see cref="OperBoxParse"/> 的输入格式，
+    /// 用本地干员表补全名称与星级，无法识别的干员（通常是本地资源过旧）跳过并记日志。
+    /// </summary>
+    /// <param name="data">一图流干员数据</param>
+    /// <returns>识别结果 details</returns>
+    private static JObject ConvertYituliuDataToDetails(List<YituliuApiService.OperatorInfo> data)
+    {
+        var ownOpers = new JArray();
+        foreach (var oper in data)
+        {
+            if (!DataHelper.Operators.TryGetValue(oper.Id, out var charInfo))
+            {
+                _logger.Information("Skipped unknown operator from yituliu open-api: {Id}", oper.Id);
+                continue;
+            }
+
+            var entry = new JObject {
+                ["id"] = oper.Id,
+                ["own"] = true,
+                ["elite"] = oper.EvolvePhase,
+                ["level"] = oper.Level,
+                ["potential"] = oper.PotentialRank,
+                ["rarity"] = charInfo.Rarity,
+            };
+            if (oper.Skills is not null)
+            {
+                entry["skills"] = JArray.FromObject(oper.Skills);
+            }
+
+            if (oper.Equips is not null)
+            {
+                entry["equips"] = JArray.FromObject(oper.Equips);
+            }
+
+            ownOpers.Add(entry);
+        }
+
+        return new JObject {
+            ["done"] = true,
+            ["own_opers"] = ownOpers,
+            ["source"] = "yituliu",
+        };
+    }
+
+    /// <summary>
+    /// 开始识别干员，按设置分派到一图流 OpenAPI 拉取或 core 本地识别。
     /// UI 绑定的方法
     /// </summary>
     /// <returns>Task</returns>
     [UsedImplicitly]
     public async Task StartOperBox()
     {
+        _runningState.BeginRun(RunOwner.Toolbox);
+        if (SettingsViewModel.ThirdPartyServiceSettings.EnableOperBoxYituliuApi)
+        {
+            await StartOperBoxFromYituliuApiAsync();
+            _runningState.SetIdle(true);
+        }
+        else
+        {
+            await StartOperBoxFromCoreAsync();
+        }
+    }
+
+    /// <summary>
+    /// 连接模拟器并开始 core 本地识别。点击即清空旧识别数据；
+    /// 运行状态只在连接失败时于此复位，识别完成由 core 回调收尾。
+    /// </summary>
+    /// <returns>Task</returns>
+    private async Task StartOperBoxFromCoreAsync()
+    {
         ResetOperBoxRecognitionState();
-        _runningState.SetIdle(false);
         string errMsg = string.Empty;
         OperBoxInfo = LocalizationHelper.GetString("ConnectingToEmulator");
         bool caught = await Task.Run(() => Instances.AsstProxy.AsstConnect(ref errMsg));
@@ -1414,13 +1820,39 @@ public class ToolboxViewModel : Screen
         StartOperBoxRecognitionTask();
     }
 
+    public List<GenericCombinedData<OperBoxExportFormat>> OperBoxExportOptionList { get; } = [
+        new(LocalizationHelper.GetString("OperBoxExportToClipboard"), OperBoxExportFormat.Clipboard),
+        new(LocalizationHelper.GetString("OperBoxExportToJson"), OperBoxExportFormat.Json),
+        new(LocalizationHelper.GetString("ExportToMarkdown"), OperBoxExportFormat.Markdown),
+        new(LocalizationHelper.GetString("ExportToCsv"), OperBoxExportFormat.Csv),
+    ];
+
+    public OperBoxExportFormat SelectedOperBoxExportValue
+    {
+        get; set {
+            SetAndNotify(ref field, value);
+            ConfigFactory.CurrentConfig.Toolbox.OperBoxExportFormat = value;
+        }
+    } = ConfigFactory.CurrentConfig.Toolbox.OperBoxExportFormat;
+
     // UI 绑定的方法
     [UsedImplicitly]
     public void ExportOperBox()
     {
+        switch (SelectedOperBoxExportValue)
+        {
+            case OperBoxExportFormat.Clipboard: ExportOperBoxToClipboard(); break;
+            case OperBoxExportFormat.Json: ExportOperBoxToJson(); break;
+            case OperBoxExportFormat.Markdown: ExportOperBoxToMarkdown(); break;
+            case OperBoxExportFormat.Csv: ExportOperBoxToCsv(); break;
+        }
+    }
+
+    private List<OperBoxData.OperData> BuildOperBoxExportList()
+    {
         if (OperBoxHaveList.Count == 0)
         {
-            return;
+            return [];
         }
 
         var exportList = new List<OperBoxData.OperData>();
@@ -1428,7 +1860,7 @@ public class ToolboxViewModel : Screen
 
         foreach (var (operId, operInfo) in DataHelper.Operators)
         {
-            if (!DataHelper.IsCharacterAvailableInClient(operInfo, SettingsViewModel.GameSettings.ClientType))
+            if (!DataHelper.IsCharacterAvailableInClient(operInfo, SettingsViewModel.GameSettings.ClientType.ToCustomString()))
             {
                 continue;
             }
@@ -1444,6 +1876,8 @@ public class ToolboxViewModel : Screen
                     Level = value.Level,
                     Potential = value.Potential,
                     Own = true,
+                    Skills = value.Skills,
+                    Equips = value.Equips,
                 });
             }
             else
@@ -1457,10 +1891,151 @@ public class ToolboxViewModel : Screen
             }
         }
 
-        System.Windows.Forms.Clipboard.Clear();
-        System.Windows.Forms.Clipboard.SetDataObject(JsonConvert.SerializeObject(exportList, Formatting.Indented));
-        OperBoxInfo = LocalizationHelper.GetString("CopiedToClipboard");
+        return exportList;
+    }
+
+    private void ExportOperBoxToClipboard()
+    {
+        var exportList = BuildOperBoxExportList();
+        if (exportList.Count == 0)
+        {
+            return;
+        }
+
+        Clipboard.Clear();
+        Clipboard.SetDataObject(JsonConvert.SerializeObject(exportList, Formatting.Indented));
+        Growl.Info(LocalizationHelper.GetString("CopiedToClipboard"));
         AchievementTrackerHelper.Instance.Unlock(AchievementIds.OperatorRoster);
+    }
+
+    private void ExportOperBoxToFile(Func<IReadOnlyList<OperBoxData.OperData>, string> contentBuilder, string filter, string defaultExt, string defaultFileName)
+    {
+        var exportList = BuildOperBoxExportList();
+        if (exportList.Count == 0)
+        {
+            return;
+        }
+
+        var content = contentBuilder(exportList);
+
+        var dialog = new Microsoft.Win32.SaveFileDialog {
+            Filter = filter,
+            DefaultExt = defaultExt,
+            FileName = defaultFileName,
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        File.WriteAllText(dialog.FileName, content, new UTF8Encoding(true));
+        Growl.Info(LocalizationHelper.GetString("ExportedToFile"));
+        AchievementTrackerHelper.Instance.Unlock(AchievementIds.OperatorRoster);
+    }
+
+    private void ExportOperBoxToJson()
+    {
+        ExportOperBoxToFile(
+            list => JsonConvert.SerializeObject(list, Formatting.Indented),
+            "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            ".json",
+            "Arknights_OperBox_Export.json");
+    }
+
+    private void ExportOperBoxToMarkdown()
+    {
+        ExportOperBoxToFile(
+            list => string.Join(Environment.NewLine, BuildOperBoxMarkdownExportLines(list, _operBoxDataSource == "yituliu")),
+            "Markdown files (*.md)|*.md|All files (*.*)|*.*",
+            ".md",
+            "Arknights_OperBox_Export.md");
+    }
+
+    private void ExportOperBoxToCsv()
+    {
+        ExportOperBoxToFile(
+            list => string.Join(Environment.NewLine, BuildOperBoxCsvExportLines(list, _operBoxDataSource == "yituliu")),
+            "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+            ".csv",
+            "Arknights_OperBox_Export.csv");
+    }
+
+    private static IEnumerable<string> BuildOperBoxMarkdownExportLines(IReadOnlyList<OperBoxData.OperData> items, bool includeYituliuFields)
+    {
+        var nameHeader = LocalizationHelper.GetString("OperBoxExportHeaderName");
+        var idHeader = LocalizationHelper.GetString("OperBoxExportHeaderId");
+        var rarityHeader = LocalizationHelper.GetString("OperBoxExportHeaderRarity");
+        var eliteHeader = LocalizationHelper.GetString("OperBoxExportHeaderElite");
+        var levelHeader = LocalizationHelper.GetString("OperBoxExportHeaderLevel");
+        var ownHeader = LocalizationHelper.GetString("OperBoxExportHeaderOwn");
+        var potentialHeader = LocalizationHelper.GetString("OperBoxExportHeaderPotential");
+        var yes = LocalizationHelper.GetString("OperBoxExportYes");
+        var no = LocalizationHelper.GetString("OperBoxExportNo");
+
+        var skillsHeader = LocalizationHelper.GetString("OperBoxExportHeaderSkills");
+        var equipsHeader = LocalizationHelper.GetString("OperBoxExportHeaderEquips");
+
+        yield return includeYituliuFields
+            ? $"| {nameHeader} | {idHeader} | {rarityHeader} | {eliteHeader} | {levelHeader} | {ownHeader} | {potentialHeader} | {skillsHeader} | {equipsHeader} |"
+            : $"| {nameHeader} | {idHeader} | {rarityHeader} | {eliteHeader} | {levelHeader} | {ownHeader} | {potentialHeader} |";
+        yield return includeYituliuFields
+            ? "| :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- |"
+            : "| :-- | :-- | :-- | :-- | :-- | :-- | :-- |";
+        foreach (var item in items)
+        {
+            var baseColumns = $"| {item.Name} | {item.Id} | {item.Rarity} | {item.Elite} | {item.Level} | {(item.Own ? yes : no)} | {item.Potential} |";
+            yield return includeYituliuFields ? baseColumns + $" {FormatSkillsColumn(item)} | {FormatEquipsColumn(item)} |" : baseColumns;
+        }
+    }
+
+    /// <summary>
+    /// 技能专精列：按技能顺序拼接专精等级（如 3/3/0），无专精技能为空。
+    /// </summary>
+    private static string FormatSkillsColumn(OperBoxData.OperData item)
+    {
+        return item.Skills is { Count: > 0 } ? string.Join("/", item.Skills.Select(s => s.Level)) : string.Empty;
+    }
+
+    /// <summary>
+    /// 模组列：分支字母加等级（如 X3 Y1），过滤等级为 0 的占位条目。
+    /// </summary>
+    private static string FormatEquipsColumn(OperBoxData.OperData item)
+    {
+        return item.Equips is { Count: > 0 }
+            ? string.Join(" ", item.Equips.Where(e => e.Level > 0).Select(e => $"{e.Type}{e.Level}"))
+            : string.Empty;
+    }
+
+    private static IEnumerable<string> BuildOperBoxCsvExportLines(IReadOnlyList<OperBoxData.OperData> items, bool includeYituliuFields)
+    {
+        var nameHeader = LocalizationHelper.GetString("OperBoxExportHeaderName");
+        var idHeader = LocalizationHelper.GetString("OperBoxExportHeaderId");
+        var rarityHeader = LocalizationHelper.GetString("OperBoxExportHeaderRarity");
+        var eliteHeader = LocalizationHelper.GetString("OperBoxExportHeaderElite");
+        var levelHeader = LocalizationHelper.GetString("OperBoxExportHeaderLevel");
+        var ownHeader = LocalizationHelper.GetString("OperBoxExportHeaderOwn");
+        var potentialHeader = LocalizationHelper.GetString("OperBoxExportHeaderPotential");
+        var yes = LocalizationHelper.GetString("OperBoxExportYes");
+        var no = LocalizationHelper.GetString("OperBoxExportNo");
+
+        var skillsHeader = LocalizationHelper.GetString("OperBoxExportHeaderSkills");
+        var equipsHeader = LocalizationHelper.GetString("OperBoxExportHeaderEquips");
+
+        yield return includeYituliuFields
+            ? $"{nameHeader},{idHeader},{rarityHeader},{eliteHeader},{levelHeader},{ownHeader},{potentialHeader},{skillsHeader},{equipsHeader}"
+            : $"{nameHeader},{idHeader},{rarityHeader},{eliteHeader},{levelHeader},{ownHeader},{potentialHeader}";
+        foreach (var item in items)
+        {
+            var name = item.Name ?? string.Empty;
+            if (name.Contains(',') || name.Contains('"') || name.Contains('\n'))
+            {
+                name = "\"" + name.Replace("\"", "\"\"") + "\"";
+            }
+
+            var baseColumns = $"{name},{item.Id},{item.Rarity},{item.Elite},{item.Level},{(item.Own ? yes : no)},{item.Potential}";
+            yield return includeYituliuFields ? baseColumns + $",{FormatSkillsColumn(item)},{FormatEquipsColumn(item)}" : baseColumns;
+        }
     }
 
     #endregion OperBox
@@ -1508,7 +2083,7 @@ public class ToolboxViewModel : Screen
 
     public async Task StartGacha(bool once = true)
     {
-        _runningState.SetIdle(false);
+        _runningState.BeginRun(RunOwner.Toolbox);
 
         string errMsg = string.Empty;
         GachaInfo = LocalizationHelper.GetString("ConnectingToEmulator");
@@ -1539,7 +2114,7 @@ public class ToolboxViewModel : Screen
     // 請勿更改
     // このコードを変更しないでください
     // 변경하지 마십시오
-    private bool _gachaShowDisclaimer = true; // !Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.ShowDisclaimerNoMore, bool.FalseString));
+    private bool _gachaShowDisclaimer = true; // !ConfigurationHelper.GetValue(ConfigurationKeys.ShowDisclaimerNoMore, false);
 
     public bool GachaShowDisclaimer
     {
@@ -1549,14 +2124,12 @@ public class ToolboxViewModel : Screen
         }
     }
 
-    private bool _gachaShowDisclaimerNoMore = Convert.ToBoolean(ConfigurationHelper.GetValue(ConfigurationKeys.GachaShowDisclaimerNoMore, bool.FalseString));
-
     public bool GachaShowDisclaimerNoMore
     {
-        get => _gachaShowDisclaimerNoMore;
+        get => ConfigFactory.CurrentConfig.Toolbox.GachaShowDisclaimerNoMore;
         set {
-            SetAndNotify(ref _gachaShowDisclaimerNoMore, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.GachaShowDisclaimerNoMore, value.ToString());
+            ConfigFactory.CurrentConfig.Toolbox.GachaShowDisclaimerNoMore = value;
+            NotifyOfPropertyChange();
         }
     }
 
@@ -1641,26 +2214,20 @@ public class ToolboxViewModel : Screen
         set => SetAndNotify(ref _peepScreenFpf, value);
     }
 
-    private int _peepTargetFps = int.Parse(ConfigurationHelper.GetValue(ConfigurationKeys.PeepTargetFps, "20"));
-
     public int PeepTargetFps
     {
-        get {
-            return _peepTargetFps;
-        }
-
-        set {
+        get; set {
             value = value switch {
                 > 600 => 600,
                 < 1 => 1,
                 _ => value,
             };
 
-            SetAndNotify(ref _peepTargetFps, value);
-            _peepImageTimer.Interval = 1000d / _peepTargetFps;
-            ConfigurationHelper.SetValue(ConfigurationKeys.PeepTargetFps, value.ToString());
+            SetAndNotify(ref field, value);
+            _peepImageTimer.Interval = 1000d / field;
+            ConfigFactory.CurrentConfig.Toolbox.PeepTargetFps = value;
         }
-    }
+    } = ConfigFactory.CurrentConfig.Toolbox.PeepTargetFps;
 
     private DateTime _lastFpsUpdateTime = DateTime.MinValue;
     private int _frameCount;
@@ -1812,9 +2379,9 @@ public class ToolboxViewModel : Screen
             AchievementTrackerHelper.Instance.Unlock(AchievementIds.PeekScreen);
 
             // 如果没任务在运行，需要先连接，并标记是由 Peep() 方法启动的 Peep
-            if (Idle)
+            if (_runningState.GetIdle())
             {
-                _runningState.SetIdle(false);
+                _runningState.BeginRun(RunOwner.Toolbox);
                 string errMsg = string.Empty;
                 bool caught = await Task.Run(() => Instances.AsstProxy.AsstConnect(ref errMsg));
                 if (!caught)
@@ -1842,34 +2409,94 @@ public class ToolboxViewModel : Screen
 
     #region MiniGame
 
-    public static ObservableCollection<MiniGameEntry> MiniGameTaskList { get; } = [];
+    public class MiniGameCategoryItem : PropertyChangedBase
+    {
+        public string Display { get; set; } = string.Empty;
+
+        public string Value { get; set; } = string.Empty;
+
+        public string Category { get; set; } = string.Empty;
+
+        public bool IsSecretFront => Value == "MiniGame@SecretFront";
+
+        public bool IsPixelPaint => Value is "MiniGame@PixelPaint" or "MiniGame@PixelPaint@Begin";
+    }
+
+    public ObservableCollection<MiniGameCategoryItem> MiniGameCategoryItems { get; } = [];
+
+    private MiniGameCategoryItem? _selectedMiniGameItem;
+
+    public MiniGameCategoryItem? SelectedMiniGameItem
+    {
+        get => _selectedMiniGameItem;
+        set {
+            if (!SetAndNotify(ref _selectedMiniGameItem, value) || value == null)
+            {
+                return;
+            }
+
+            MiniGameTaskName = value.Value;
+        }
+    }
+
+    /// <summary>
+    /// Gets the index of the selected mini game in the list.
+    /// </summary>
+    // 注：MiniGameCategoryItems 在 UpdateMiniGameTaskList 中会 Clear+重建，若此刻未选中项已不在列表，
+    // IndexOf 返回 -1（随后由 setter 重新对齐）；
+    [PropertyDependsOn(nameof(SelectedMiniGameItem))]
+    public int SelectedMiniGameIndex => SelectedMiniGameItem is { } selected
+        ? MiniGameCategoryItems.IndexOf(selected)
+        : -1;
+
+    public bool IsPixelPaintSelected => SelectedMiniGameItem?.IsPixelPaint == true;
 
     public static void UpdateMiniGameTaskList()
     {
-        var tasks = Instances.StageManager.MiniGameEntries
-            .Select(t => new MiniGameEntry { Display = t.Display, DisplayKey = t.DisplayKey, Value = t.Value, Tip = t.Tip, TipKey = t.TipKey })
+        var categorizedItems = Instances.StageManager.MiniGameEntries
+            .Select(t => {
+                var isCurrentEvent = t.UtcStartTime != DateTime.MinValue || t.UtcExpireTime != DateTime.MinValue;
+                var category = LocalizationHelper.GetString(isCurrentEvent
+                    ? "MiniGameCategoryCurrentEvent"
+                    : "MiniGameCategoryPermanent");
+                return new MiniGameCategoryItem {
+                    Display = string.IsNullOrEmpty(t.DisplayKey)
+                        ? t.Display
+                        : (LocalizationHelper.TryGetString(t.DisplayKey, out var loc) ? loc : t.Display),
+                    Value = t.Value,
+                    Category = category,
+                };
+            })
             .ToList();
 
         Execute.OnUIThread(() => {
-            MiniGameTaskList.Clear();
-            foreach (var task in tasks)
+            var toolbox = Instances.ToolboxViewModel;
+            if (toolbox == null)
             {
-                MiniGameTaskList.Add(task);
+                return;
             }
+
+            var prevSelected = toolbox.SelectedMiniGameItem?.Value;
+
+            toolbox.MiniGameCategoryItems.Clear();
+            foreach (var item in categorizedItems)
+            {
+                toolbox.MiniGameCategoryItems.Add(item);
+            }
+
+            toolbox.SelectedMiniGameItem = toolbox.MiniGameCategoryItems
+                .FirstOrDefault(i => i.Value == prevSelected)
+                ?? toolbox.MiniGameCategoryItems.FirstOrDefault();
         });
     }
 
-    private string _miniGameTaskName = ConfigurationHelper.GetGlobalValue(ConfigurationKeys.MiniGameTaskName, "SS@Store@Begin");
-
     public string MiniGameTaskName
     {
-        get => _miniGameTaskName;
-        set {
-            SetAndNotify(ref _miniGameTaskName, value);
-            ConfigurationHelper.SetGlobalValue(ConfigurationKeys.MiniGameTaskName, value);
+        get; set {
+            SetAndNotify(ref field, value);
             MiniGameTip = GetMiniGameTip(value);
         }
-    }
+    } = "SS@Store@Begin";
 
     public string GetMiniGameTask()
     {
@@ -1909,7 +2536,7 @@ public class ToolboxViewModel : Screen
             return tipFromKey;
         }
 
-        // 然后使用 explicit Tip
+        // 然后使用 API Tip
         if (!string.IsNullOrEmpty(entry.Tip))
         {
             return entry.Tip;
@@ -1941,67 +2568,586 @@ public class ToolboxViewModel : Screen
 
     public List<string> SecretFrontEndingList { get; set; } = ["A", "B", "C", "D", "E"];
 
-    private string _secretFrontEnding = ConfigurationHelper.GetValue(ConfigurationKeys.MiniGameSecretFrontEnding, "A");
+    public string SecretFrontEnding { get; set => SetAndNotify(ref field, value); } = "A";
 
-    public string SecretFrontEnding
+    public LocalizedObservableList<string> SecretFrontEventList { get; } = new(
+        (string.Empty, "NotSelected"),
+        ("支援作战平台", "MiniGame@SecretFront@Event1"),
+        ("游侠", "MiniGame@SecretFront@Event2"),
+        ("诡影迷踪", "MiniGame@SecretFront@Event3"));
+
+    public string SecretFrontEvent { get; set => SetAndNotify(ref field, value); } = string.Empty;
+
+    #region PixelPaint
+
+    /// <summary>像素画支持的图片扩展名，文件对话框过滤器与剪贴板文件判断共用。</summary>
+    private static readonly string[] _pixelPaintImageExtensions = [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"];
+
+    private BitmapSource? _pixelPaintSourceImage;
+
+    private BitmapSource? _pixelPaintPreview;
+
+    public BitmapSource? PixelPaintPreview
     {
-        get => _secretFrontEnding;
-        set {
-            SetAndNotify(ref _secretFrontEnding, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.MiniGameSecretFrontEnding, value);
+        get => _pixelPaintPreview;
+        private set => SetAndNotify(ref _pixelPaintPreview, value);
+    }
+
+    private string _pixelPaintStatusText = string.Empty;
+
+    public string PixelPaintStatusText
+    {
+        get => _pixelPaintStatusText;
+        private set => SetAndNotify(ref _pixelPaintStatusText, value);
+    }
+
+    private PixelPaintHelper.PreparedImage? _pixelPaintPrepared;
+
+    private PixelPaintHelper.ConvertResult? _pixelPaintResult;
+
+    private bool _pixelPaintParametersLocked;
+
+    public bool PixelPaintParametersLocked
+    {
+        get => _pixelPaintParametersLocked;
+        private set => SetAndNotify(ref _pixelPaintParametersLocked, value);
+    }
+
+    /// <summary>相对去边后内容图的归一化取景（0~1）。</summary>
+    private System.Windows.Rect _pixelPaintView = new(0, 0, 1, 1);
+
+    private System.Windows.Point? _pixelPaintDragStart;
+
+    private System.Windows.Rect _pixelPaintDragOriginView;
+
+    public LocalizedObservableList<string> PixelPaintFitModeList { get; } = new(
+        ("Crop", "MiniGame@PixelPaint@FitCrop"),
+        ("Contain", "MiniGame@PixelPaint@FitContain"),
+        ("Stretch", "MiniGame@PixelPaint@FitStretch"));
+
+    public string PixelPaintFitMode
+    {
+        get; set {
+            if (SetAndNotify(ref field, value))
+            {
+                ReconvertPixelPaint();
+            }
+        }
+    } = "Crop";
+
+    public LocalizedObservableList<string> PixelPaintDitherModeList { get; } = new(
+        ("Illustration", "MiniGame@PixelPaint@DitherIllustration"),
+        ("None", "MiniGame@PixelPaint@DitherNone"),
+        ("FloydSteinberg", "MiniGame@PixelPaint@DitherFS"),
+        ("Atkinson", "MiniGame@PixelPaint@DitherAtkinson"));
+
+    public string PixelPaintDitherMode
+    {
+        get; set {
+            if (SetAndNotify(ref field, value))
+            {
+                ReconvertPixelPaint();
+            }
+        }
+    } = "Illustration";
+
+    public double PixelPaintContrast
+    {
+        get; set {
+            if (SetAndNotify(ref field, value))
+            {
+                ReconvertPixelPaint();
+            }
+        }
+    } = 100;
+
+    public double PixelPaintBrightness
+    {
+        get; set {
+            if (SetAndNotify(ref field, value))
+            {
+                ReconvertPixelPaint();
+            }
+        }
+    } = 100;
+
+    public double PixelPaintSaturation
+    {
+        get; set {
+            if (SetAndNotify(ref field, value))
+            {
+                ReconvertPixelPaint();
+            }
+        }
+    } = 100;
+
+    public bool PixelPaintPaintWhite
+    {
+        get; set {
+            if (SetAndNotify(ref field, value))
+            {
+                ReconvertPixelPaint();
+            }
         }
     }
 
-    public List<GenericCombinedData<string>> SecretFrontEventList { get; set; } = [
-        new GenericCombinedData<string> { Display = LocalizationHelper.GetString("NotSelected"), Value = string.Empty },
-        new GenericCombinedData<string> { Display = LocalizationHelper.GetString("MiniGame@SecretFront@Event1"), Value = "支援作战平台" },
-        new GenericCombinedData<string> { Display = LocalizationHelper.GetString("MiniGame@SecretFront@Event2"), Value = "游侠" },
-        new GenericCombinedData<string> { Display = LocalizationHelper.GetString("MiniGame@SecretFront@Event3"), Value = "诡影迷踪" },
-    ];
+    /// <summary>拖动绘制开关：同色同行连续格一次画完（更快，部分触控模式可能丢点）。</summary>
+    public bool PixelPaintSwipeEnabled { get; set; } = true;
 
-    private string _secretFrontEvent = ConfigurationHelper.GetValue(ConfigurationKeys.MiniGameSecretFrontEvent, string.Empty);
+    /// <summary>每格额外等待（ms），默认 0；点击后等待与拖动时长均会累加（各触控方式自带基础间隔）。</summary>
+    public int PixelPaintGridDelay { get; set; } = 0;
 
-    public string SecretFrontEvent
+    public void PixelPaintPickImage()
     {
-        get => _secretFrontEvent;
-        set {
-            SetAndNotify(ref _secretFrontEvent, value);
-            ConfigurationHelper.SetValue(ConfigurationKeys.MiniGameSecretFrontEvent, value);
+        if (PixelPaintParametersLocked)
+        {
+            return;
+        }
+
+        var dialog = new Microsoft.Win32.OpenFileDialog {
+            Filter = "Image|" + string.Join(";", _pixelPaintImageExtensions.Select(ext => "*" + ext)) + "|All|*.*",
+            CheckFileExists = true,
+            Multiselect = false,
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        LoadPixelPaintImage(dialog.FileName);
+    }
+
+    public void PixelPaintDrop(object sender, DragEventArgs e)
+    {
+        if (PixelPaintParametersLocked || e.Data == null)
+        {
+            return;
+        }
+
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            return;
+        }
+
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] files || files.Length == 0)
+        {
+            return;
+        }
+
+        LoadPixelPaintImage(files[0]);
+    }
+
+    public void PixelPaintDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = (!PixelPaintParametersLocked && e.Data?.GetDataPresent(DataFormats.FileDrop) == true)
+            ? DragDropEffects.Copy
+            : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// 像素画：响应 Ctrl+V，从剪贴板粘贴。
+    /// 优先剪贴板位图（截图、浏览器 ｢复制图片｣ 等无文件场景），
+    /// 其次已复制的图片文件，最后剪贴板文字——文字会渲染成四角布局图片；
+    /// 加载失败时与文件加载一致地提示。
+    /// </summary>
+    /// <param name="sender">事件源（绑定 KeyDown 的 MiniGame Grid）。</param>
+    /// <param name="e">按键事件数据。</param>
+    public void PixelPaintKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.V || Keyboard.Modifiers != ModifierKeys.Control || !IsPixelPaintSelected || PixelPaintParametersLocked)
+        {
+            return;
+        }
+
+        try
+        {
+            if (Clipboard.ContainsImage() || Clipboard.ContainsData(DataFormats.Dib))
+            {
+                var bmp = GetClipboardImage();
+                if (bmp != null)
+                {
+                    LoadPixelPaintImage(bmp);
+                }
+            }
+            else if (Clipboard.GetFileDropList() is { Count: > 0 } files && files[0] is { } file)
+            {
+                var ext = Path.GetExtension(file).ToLowerInvariant();
+                if (_pixelPaintImageExtensions.Contains(ext))
+                {
+                    LoadPixelPaintImage(file);
+                }
+            }
+            else if (Clipboard.ContainsText())
+            {
+                // 复制的是文字：渲染成四角布局图片（取前 4 个字素）
+                var text = Clipboard.GetText().Trim();
+                if (text.Length > 0)
+                {
+                    LoadPixelPaintImage(PixelPaintHelper.RenderTextToBitmap(text));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // 剪贴板位图加载异常（如格式不被 Prepare 支持），与文件加载一致地提示
+            _logger.Warning(ex, "Paste pixel paint image failed");
+            PixelPaintStatusText = LocalizationHelper.GetString("MiniGame@PixelPaint@LoadFailed");
         }
     }
+
+    /// <summary>
+    /// 从剪贴板取图。优先用 DIB 原始数据自行解码——
+    /// WPF 的 Clipboard.GetImage() 对 DIB 的转换存在通道错乱/尺寸错乱问题，
+    /// 重建 BMP 文件头自行解码可规避该缺陷；失败则回退到 GetImage()。
+    /// </summary>
+    /// <returns>解码后的 BitmapSource；剪贴板无图或解码失败时返回 null。</returns>
+    private static BitmapSource? GetClipboardImage()
+    {
+        try
+        {
+            if (Clipboard.ContainsData(DataFormats.Dib) && Clipboard.GetData(DataFormats.Dib) is Stream dib)
+            {
+                return DecodeDibAsBmp(dib);
+            }
+        }
+        catch
+        {
+            // ignored
+        }
+
+        try
+        {
+            return Clipboard.GetImage();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 将剪贴板 DIB（BITMAPINFOHEADER + 调色板 + 像素数据）解码为 BitmapSource：
+    /// 在前面补一个 14 字节的 BITMAPFILEHEADER，拼成完整 BMP 后交给解码器。
+    /// </summary>
+    /// <param name="dib">剪贴板 DIB 数据流（BITMAPINFOHEADER + 调色板 + 像素）。</param>
+    /// <returns>解码后的 BitmapSource；数据非法或过短时返回 null。</returns>
+    private static BitmapSource? DecodeDibAsBmp(Stream dib)
+    {
+        if (dib.Length < 40)
+        {
+            return null;
+        }
+
+        // 读取 BITMAPINFOHEADER 固定前 40 字节，计算像素数据在文件中的偏移
+        var info = new byte[40];
+        dib.Position = 0;
+        dib.ReadExactly(info, 0, info.Length);
+        var biSize = BitConverter.ToInt32(info, 0);
+        var biBitCount = BitConverter.ToInt16(info, 14);
+        var biClrUsed = BitConverter.ToInt32(info, 32);
+        var paletteSize = biBitCount <= 8
+            ? (biClrUsed > 0 ? biClrUsed : 1 << biBitCount) * 4
+            : 0;
+        var offset = 14 + biSize + paletteSize;
+        if (biSize < 40 || offset > dib.Length)
+        {
+            return null;
+        }
+
+        // 构造 BMP 文件头：'BM' 标志、文件总长度、像素数据偏移
+        var header = new byte[14];
+        header[0] = (byte)'B';
+        header[1] = (byte)'M';
+        BitConverter.GetBytes((int)dib.Length + 14).CopyTo(header, 2);
+        BitConverter.GetBytes(offset).CopyTo(header, 10);
+
+        var merged = new MemoryStream();
+        merged.Write(header, 0, header.Length);
+        dib.Position = 0;
+        dib.CopyTo(merged);
+        merged.Position = 0;
+
+        var bmp = new BitmapImage();
+        bmp.BeginInit();
+        bmp.CacheOption = BitmapCacheOption.OnLoad;
+        bmp.StreamSource = merged;
+        bmp.EndInit();
+        bmp.Freeze();
+        return bmp;
+    }
+
+    public void PixelPaintPreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (PixelPaintParametersLocked || _pixelPaintSourceImage == null)
+        {
+            return;
+        }
+
+        // 滚轮缩放取景：向上放大（缩小 view），向下缩小（放大 view）
+        var factor = e.Delta > 0 ? 0.9 : 1.0 / 0.9;
+        var cx = _pixelPaintView.X + (_pixelPaintView.Width / 2);
+        var cy = _pixelPaintView.Y + (_pixelPaintView.Height / 2);
+        var nw = Math.Clamp(_pixelPaintView.Width * factor, 0.05, 1.0);
+        var nh = Math.Clamp(_pixelPaintView.Height * factor, 0.05, 1.0);
+        var nx = Math.Clamp(cx - (nw / 2), 0, 1 - nw);
+        var ny = Math.Clamp(cy - (nh / 2), 0, 1 - nh);
+        _pixelPaintView = new System.Windows.Rect(nx, ny, nw, nh);
+        ReconvertPixelPaint();
+        e.Handled = true;
+    }
+
+    public void PixelPaintPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (PixelPaintParametersLocked || _pixelPaintSourceImage == null)
+        {
+            return;
+        }
+
+        if (sender is not IInputElement el)
+        {
+            return;
+        }
+
+        _pixelPaintDragStart = e.GetPosition(el);
+        _pixelPaintDragOriginView = _pixelPaintView;
+        el.CaptureMouse();
+        e.Handled = true;
+    }
+
+    public void PixelPaintPreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_pixelPaintDragStart is null || PixelPaintParametersLocked)
+        {
+            return;
+        }
+
+        if (sender is not FrameworkElement el)
+        {
+            return;
+        }
+
+        var pos = e.GetPosition(el);
+        var dx = (pos.X - _pixelPaintDragStart.Value.X) / Math.Max(1.0, el.ActualWidth);
+        var dy = (pos.Y - _pixelPaintDragStart.Value.Y) / Math.Max(1.0, el.ActualHeight);
+
+        // 拖图像：鼠标右移时内容左移（view.X 减小）
+        var nx = Math.Clamp(_pixelPaintDragOriginView.X - (dx * _pixelPaintDragOriginView.Width), 0, 1 - _pixelPaintDragOriginView.Width);
+        var ny = Math.Clamp(_pixelPaintDragOriginView.Y - (dy * _pixelPaintDragOriginView.Height), 0, 1 - _pixelPaintDragOriginView.Height);
+        _pixelPaintView = new System.Windows.Rect(nx, ny, _pixelPaintDragOriginView.Width, _pixelPaintDragOriginView.Height);
+        ReconvertPixelPaint();
+        e.Handled = true;
+    }
+
+    public void PixelPaintPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is IInputElement el && el.IsMouseCaptured)
+        {
+            el.ReleaseMouseCapture();
+        }
+
+        _pixelPaintDragStart = null;
+        e.Handled = true;
+    }
+
+    public void PixelPaintResetView()
+    {
+        if (PixelPaintParametersLocked)
+        {
+            return;
+        }
+
+        _pixelPaintView = new System.Windows.Rect(0, 0, 1, 1);
+        ReconvertPixelPaint();
+    }
+
+    public void PixelPaintResetParameters()
+    {
+        if (PixelPaintParametersLocked)
+        {
+            return;
+        }
+
+        _pixelPaintView = new System.Windows.Rect(0, 0, 1, 1);
+        PixelPaintFitMode = "Crop";
+        PixelPaintDitherMode = "Illustration";
+        PixelPaintContrast = 100;
+        PixelPaintBrightness = 100;
+        PixelPaintSaturation = 100;
+        PixelPaintPaintWhite = false;
+        ReconvertPixelPaint();
+    }
+
+    private void LoadPixelPaintImage(string path)
+    {
+        try
+        {
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.UriSource = new Uri(path);
+            bmp.EndInit();
+            bmp.Freeze();
+
+            LoadPixelPaintImage(bmp);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Load pixel paint image failed: {Path}", path);
+            PixelPaintStatusText = LocalizationHelper.GetString("MiniGame@PixelPaint@LoadFailed");
+        }
+    }
+
+    private void LoadPixelPaintImage(BitmapSource bmp)
+    {
+        if (bmp.CanFreeze)
+        {
+            bmp.Freeze();
+        }
+
+        _pixelPaintSourceImage = bmp;
+        _pixelPaintPrepared = PixelPaintHelper.Prepare(bmp, trimEmptyBorder: true);
+        _pixelPaintView = new System.Windows.Rect(0, 0, 1, 1);
+        ReconvertPixelPaint();
+    }
+
+    private void ReconvertPixelPaint()
+    {
+        if (PixelPaintParametersLocked || _pixelPaintSourceImage == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var fit = PixelPaintFitMode switch {
+                "Contain" => PixelPaintHelper.FitMode.Contain,
+                "Stretch" => PixelPaintHelper.FitMode.Stretch,
+                _ => PixelPaintHelper.FitMode.Crop,
+            };
+            var dither = PixelPaintDitherMode switch {
+                "None" => PixelPaintHelper.DitherMode.None,
+                "Atkinson" => PixelPaintHelper.DitherMode.Atkinson,
+                "Illustration" => PixelPaintHelper.DitherMode.Illustration,
+                _ => PixelPaintHelper.DitherMode.FloydSteinberg,
+            };
+
+            var options = new PixelPaintHelper.ConvertOptions {
+                Fit = fit,
+                Dither = dither,
+                ContrastPercent = PixelPaintContrast,
+                BrightnessPercent = PixelPaintBrightness,
+                SaturationPercent = PixelPaintSaturation,
+                ContentViewNormalized = _pixelPaintView,
+                TrimEmptyBorder = true,
+            };
+
+            if (_pixelPaintPrepared == null)
+            {
+                return;
+            }
+
+            var result = PixelPaintHelper.Convert(_pixelPaintPrepared, options, skipWhite: !PixelPaintPaintWhite);
+            _pixelPaintResult = result;
+            PixelPaintPreview = result.Preview;
+            PixelPaintStatusText = string.Format(
+                LocalizationHelper.GetString("MiniGame@PixelPaint@ReadyStatus"),
+                result.PaintedCellCount,
+                result.Groups.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Pixel paint convert failed");
+            _pixelPaintResult = null;
+            PixelPaintPreview = null;
+            PixelPaintStatusText = LocalizationHelper.GetString("MiniGame@PixelPaint@ConvertFailed");
+        }
+    }
+
+    #endregion
 
     public void StartMiniGame()
     {
         _ = StartMiniGameAsync();
     }
 
-    private async Task StartMiniGameAsync()
+    /// <summary>
+    /// 停止小游戏；其他任务运行时作为跨页停止入口，走手动停止核心。
+    /// UI 绑定的方法
+    /// </summary>
+    /// <returns>Task</returns>
+    [UsedImplicitly]
+    public async Task StopMiniGame()
     {
-        if (!Idle)
+        // 小游戏自身运行中的停止是清场，不发射结束脚本；
+        // 其他归属的运行经此停止属手动停止语义，脚本条件由运行归属判定
+        if (_runningState.Owner == RunOwner.MiniGame)
         {
             await Instances.TaskQueueViewModel.Stop();
+        }
+        else
+        {
+            await Instances.TaskQueueViewModel.StopManuallyAsync();
+        }
+    }
+
+    private async Task StartMiniGameAsync()
+    {
+        var isPixelPaint = IsPixelPaintSelected;
+        if (isPixelPaint && (_pixelPaintResult == null || _pixelPaintResult.Groups.Count == 0))
+        {
+            Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("MiniGame@PixelPaint@NeedImage"), UiLogColor.Warning);
             return;
         }
 
-        _runningState.SetIdle(false);
+        Instances.TaskQueueViewModel.ClearLog();
+
+        _runningState.BeginRun(RunOwner.MiniGame);
+        if (isPixelPaint)
+        {
+            PixelPaintParametersLocked = true;
+        }
+
         string errMsg = string.Empty;
         bool caught = await Task.Run(() => Instances.AsstProxy.AsstConnect(ref errMsg));
         if (!caught)
         {
+            Instances.TaskQueueViewModel.AddLog(errMsg, UiLogColor.Error);
             _runningState.SetIdle(true);
+            PixelPaintParametersLocked = false;
             return;
         }
 
         if (_runningState.GetStopping())
         {
             Instances.TaskQueueViewModel.SetStopped();
+            PixelPaintParametersLocked = false;
             return;
         }
 
-        caught = Instances.AsstProxy.AsstMiniGame(GetMiniGameTask());
+        if (isPixelPaint)
+        {
+            var groups = _pixelPaintResult!.Groups;
+            caught = Instances.AsstProxy.AsstPixelPaint(groups, PixelPaintSwipeEnabled, PixelPaintGridDelay);
+            if (caught)
+            {
+                Instances.TaskQueueViewModel.AddLog(
+                    string.Format(
+                        LocalizationHelper.GetString("MiniGame@PixelPaint@StartLog"),
+                        groups.Sum(g => g.Points.Count),
+                        groups.Count),
+                    UiLogColor.Info);
+            }
+        }
+        else
+        {
+            caught = Instances.AsstProxy.AsstMiniGame(GetMiniGameTask());
+        }
+
         if (!caught)
         {
             _runningState.SetIdle(true);
+            PixelPaintParametersLocked = false;
         }
         else
         {

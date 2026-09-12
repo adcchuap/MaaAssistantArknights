@@ -11,7 +11,9 @@ icon: material-symbols:view-quilt-rounded
 请注意 JSON 文件是不支持注释的，文本中的注释仅用于演示，请勿直接复制使用
 :::
 
-[可视化排班生成工具](https://ark.yituliu.cn/tools/schedule)
+[可视化排班生成工具](https://ark.yituliu.cn/tools/scheduleV3)
+
+[自动生成基建排班表工具](https://riic.autos/)
 
 ## 完整字段一览
 
@@ -137,6 +139,6 @@ icon: material-symbols:view-quilt-rounded
 
 ## 举例
 
-[243 极限效率，一天三换](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/243_layout_3_times_a_day.json)
+[243 极限效率，一天三换](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/243_layout_3_times_a_day.json)
 
-[153 极限效率，一天三换](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master/resource/custom_infrast/153_layout_3_times_a_day.json)
+[153 极限效率，一天三换](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/master-v2/resource/custom_infrast/153_layout_3_times_a_day.json)

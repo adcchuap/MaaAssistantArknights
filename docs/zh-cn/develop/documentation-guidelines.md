@@ -13,13 +13,15 @@ icon: jam:write-f
 
 ## 本地部署
 
-1. 安装 [pnpm](https://pnpm.io/installation)，并参考 [Pull Request 流程简述](./development.md#github-pull-request-流程简述)将仓库克隆到本地。
+1. 安装 [pnpm](https://pnpm.io/installation)，并参考 [Pull Request 流程简述](./development.md)将仓库克隆到本地。
 2. 在 `docs` 目录下新建终端，运行 `pnpm i` 部署依赖。
 3. 运行 `pnpm run dev` 进行部署。
 
 ## 容器与卡片
 
 该主题提供了关于提示、注释、信息、注意、警告和详情自定义容器的支持，我们可以利用这一特性来强调部分内容
+
+需要注意的是，如果容器中嵌套了容器，则父级容器应比子集容器多写一个冒号 `:` 以进行区分，例如[步骤容器](#步骤)
 
 容器的使用方法：
 
@@ -44,7 +46,7 @@ icon: jam:write-f
 - `warning` 注意
 - `danger` 警告
 - `details` 详情
-- `demo-warpper` ==特殊容器==
+- `window` ==特殊容器==
 
 ### 容器示例
 
@@ -72,7 +74,7 @@ icon: jam:write-f
 这是详情容器
 :::
 
-::: demo-wrapper
+::: window
 这是一个很特殊的容器
 :::
 
@@ -113,7 +115,7 @@ MaaAssistantArknights 是由 ==很多猪== 开发的
 
 有以下配置可以使用
 
-::: demo-wrapper
+::: window
 输入：
 
 ```markdown
@@ -135,8 +137,6 @@ MaaAssistantArknights 是由 ==很多猪== 开发的
 ## 步骤
 
 当你正在写一个步骤化的教程时，有序列表可能会因为嵌套失去层次感，这种时候 `steps` 容器就是最好的选择
-
-注意该容器用四个冒号来标记开始和结束，与常规的容器不同
 
 输入：
 
@@ -188,11 +188,11 @@ MaaAssistantArknights 是由 ==很多猪== 开发的
 
 ## 智能图片容器
 
-我们基于主题提供的功能包装了一个图片容器。该容器能够在亮暗主题下自动显示对应主题的，同时支持自动布局
+我们基于主题提供的功能包装了一个图片容器。该容器能够在亮暗主题下自动显示对应主题的图片，同时支持自动布局
 
 你可以在 markdown 正文中使用 `<ImageGrid>` 组件来调用该方法，具体的语法和效果如下
 
-::: demo-wrapper
+::: window
 
 这是语法：
 
@@ -239,20 +239,31 @@ MaaAssistantArknights 是由 ==很多猪== 开发的
 效果展示如下
 
 :::: field-group
-::: field name="theme" type="ThemeConfig" required default="{ base: '/' }"
+::: field theme
+@type ThemeConfig
+@default { base: '/' }
+@required
 主题配置
 :::
 
-::: field name="enabled" type="boolean" optional default="true"
+::: field enabled
+@type boolean
+@default true
+@optional
 是否启用
 :::
 
-::: field name="callback" type="(...args: any[]) => void" optional default="() => {}"
+::: field callback
+@type (...args: any[]) => void
+@default () => {}
+@optional
 <Badge type="tip" text="v1.0.0 新增"  />
 回调函数
 :::
 
-::: field name="other" type="string" deprecated
+::: field other
+@type string
+@deprecated
 <Badge type="danger" text="v0.9.0 弃用"  />
 已弃用属性
 :::
@@ -292,7 +303,7 @@ icon: jam:write-f
 - `color` 接受 css 风格的颜色值，如 `#fff`，`red` 等（该选项仅对 svg 图标有效）
 - `size` 接受 css 风格的大小，如 `1rem`，`2em`，`100px` 等
 
-::: demo-wrapper 案例
+::: window 案例
 
 输入：
 

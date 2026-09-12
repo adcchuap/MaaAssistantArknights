@@ -32,6 +32,32 @@ asst::InfrastAbstractTask& asst::InfrastAbstractTask::set_mood_threshold(double 
     return *this;
 }
 
+asst::InfrastAbstractTask& asst::InfrastAbstractTask::set_task_data(std::shared_ptr<infrast::TaskData> data) noexcept
+{
+    m_task_data = std::move(data);
+    return *this;
+}
+
+void asst::InfrastAbstractTask::stage_operator_selection(const std::string& operator_id)
+{
+    if (operator_id.empty()) {
+        return;
+    }
+    LogTrace << __FUNCTION__ << "infrastructure operator staged" << facility_name() << operator_id;
+    m_pending_operator_ids.emplace(operator_id);
+    if (m_task_data) {
+        m_task_data->pending_operator_ids.emplace(operator_id);
+    }
+}
+
+void asst::InfrastAbstractTask::discard_pending_selection()
+{
+    m_pending_operator_ids.clear();
+    if (m_task_data) {
+        m_task_data->discard_pending();
+    }
+}
+
 json::value asst::InfrastAbstractTask::basic_info() const
 {
     json::value info = AbstractTask::basic_info();
@@ -191,6 +217,8 @@ void asst::InfrastAbstractTask::set_available_oper_for_group(std::set<std::strin
 bool asst::InfrastAbstractTask::on_run_fails()
 {
     LogTraceFunction;
+
+    discard_pending_selection();
 
     ProcessTask return_task(*this, { "InfrastBegin" });
     return return_task.run();
@@ -670,16 +698,24 @@ bool asst::InfrastAbstractTask::click_filter_menu_not_stationed_button()
 {
     LogTraceFunction;
 
-    ProcessTask task(*this, { "InfrastFilterMenuNotStationed" });
-    return task.run();
+    // 如果菜单已经打开，先直接找菜单里的“未进驻”；如果顶部已是“未进驻”选中态，直接成功。
+    // 否则先点击顶部筛选菜单再找“未进驻”。最终必须走到 Stop 才返回 true。
+    ProcessTask task(
+        *this,
+        { "InfrastFilterMenuNotStationedButton",
+          "InfrastFilterMenuNotStationedSelected",
+          "InfrastFilterMenuNotStationed" });
+    return task.run() && task.get_last_task_name() == "Stop";
 }
 
 bool asst::InfrastAbstractTask::click_filter_menu_cancel_not_stationed_button()
 {
     LogTraceFunction;
 
-    ProcessTask task(*this, { "InfrastFilterMenuCancelNotStationed" });
-    return task.run();
+    // 如果菜单已经打开，直接找“全部”；否则先点击顶部筛选菜单再找“全部”。
+    // 最终必须走到 Stop 才算取消成功。
+    ProcessTask task(*this, { "InfrastFilterMenuAllButton", "InfrastFilterMenuCancelNotStationed" });
+    return task.run() && task.get_last_task_name() == "Stop";
 }
 
 bool asst::InfrastAbstractTask::click_confirm_button()
@@ -689,7 +725,17 @@ bool asst::InfrastAbstractTask::click_confirm_button()
     ProcessTask task(*this, { "InfrastDormConfirmButton" });
     bool ret = task.run();
     if (ret) {
+        for (const auto& operator_id : m_pending_operator_ids) {
+            Log.trace("infrastructure operator committed", facility_name(), operator_id);
+        }
+        if (m_task_data) {
+            m_task_data->commit_pending();
+        }
+        discard_pending_selection();
         callback(AsstMsg::SubTaskExtraInfo, basic_info_with_what("InfrastConfirmButton"));
+    }
+    else {
+        discard_pending_selection();
     }
     return ret;
 }

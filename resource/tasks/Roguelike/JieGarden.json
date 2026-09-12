@@ -51,8 +51,8 @@
     },
     "JieGarden@Roguelike@ChooseOper": {
         "next": [
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@ChooseOperFlag@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@ChooseOperFlag@(JieGarden@Roguelike@CloseCollectionClose)",
             "JieGarden@Roguelike@ChooseOperConfirm",
             "JieGarden@Roguelike@ChooseOperConfirmToGiveUp",
             "JieGarden@Roguelike@Abandon",
@@ -112,32 +112,29 @@
                 [170, 170, 170]
             ]
         ],
-        "next": [
-            "JieGarden@Roguelike@StageEncounterEnter",
-            "JieGarden@Roguelike@Stages#next",
-            "JieGarden@Roguelike@DropsFlag",
-            "JieGarden@Roguelike@CloseEvent",
-            "JieGarden@Roguelike@ChooseOperFlag",
-            "JieGarden@Roguelike@CoppersExchangeFinish",
-            "JieGarden@Roguelike@CoppersRecastResult"
-        ]
+        "onErrorNext": ["#back"],
+        "next": ["#next"]
     },
     "JieGarden@Roguelike@CloseCollectionContinue": {
+        "doc": "类似招募卷奖励后点next, 后续其他执行也重构为此类",
         "action": "ClickSelf",
         "roi": [563, 486, 174, 125],
-        "next": [
-            "JieGarden@Roguelike@StageEncounterEnter",
-            "JieGarden@Roguelike@Stages#next",
-            "JieGarden@Roguelike@DropsFlag",
-            "JieGarden@Roguelike@CloseEvent",
-            "JieGarden@Roguelike@ChooseOperFlag",
-            "JieGarden@Roguelike@CoppersExchangeFinish",
-            "JieGarden@Roguelike@CoppersRecastResult"
-        ]
+        "templThreshold": 0.95,
+        "onErrorNext": ["#back"],
+        "next": ["#next"]
     },
     "JieGarden@Roguelike@CloseEvent": {
         "action": "ClickRect",
-        "specificRect": [153, 79, 63, 29]
+        "specificRect": [153, 79, 63, 29],
+        "next": [
+            "JieGarden@Roguelike@StageEncounterEnter",
+            "JieGarden@Roguelike@CloseEvent@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@CloseEvent@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@CloseEvent",
+            "JieGarden@Roguelike@Stages#next",
+            "JieGarden@Roguelike@StageEncounterOptions#next",
+            "JieGarden@Roguelike@DropsFlag"
+        ]
     },
     "JieGarden@Roguelike@CloseInterview": {
         "template": "JieGarden@Roguelike@CloseCollectionClose.png"
@@ -160,7 +157,7 @@
         "Doc": "放弃交换通宝的确认按钮",
         "baseTask": "JieGarden@Roguelike@CoppersListDialogConfirm",
         "template": "JieGarden@Roguelike@CoppersListDialogConfirm.png",
-        "next": ["JieGarden@Roguelike@CoppersTakeFlag#next", "#self"]
+        "next": ["JieGarden@Roguelike@DropsFlag", "JieGarden@Roguelike@CloseEvent", "#self"]
     },
     "JieGarden@Roguelike@CoppersAbandonExchange": {
         "Doc": "放弃交换通宝按钮",
@@ -247,8 +244,8 @@
         "baseTask": "JieGarden@Roguelike@CoppersListDialogConfirm",
         "template": "JieGarden@Roguelike@CoppersListDialogConfirm.png",
         "next": [
-            "JieGarden@Roguelike@CloseCollectionClose",
-            "JieGarden@Roguelike@CloseCollectionContinue",
+            "JieGarden@Roguelike@CoppersExchangeConfirm@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@CoppersExchangeConfirm@(JieGarden@Roguelike@CloseCollectionContinue)",
             "JieGarden@Roguelike@CoppersExchangeFinish",
             "#self"
         ]
@@ -375,8 +372,8 @@
         "roi": [794, 559, 381, 147],
         "postDelay": 3000,
         "next": [
-            "JieGarden@Roguelike@CloseCollectionClose",
-            "JieGarden@Roguelike@CloseCollectionContinue",
+            "JieGarden@Roguelike@CoppersRecastConfirm-NoRetain@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@CoppersRecastConfirm-NoRetain@(JieGarden@Roguelike@CloseCollectionContinue)",
             "JieGarden@Roguelike@CoppersRecastResult",
             "#self"
         ]
@@ -388,8 +385,8 @@
         "postDelay": 500,
         "roi": [1033, 462, 153, 155],
         "next": [
-            "JieGarden@Roguelike@CloseCollectionClose",
-            "JieGarden@Roguelike@CloseCollectionContinue",
+            "JieGarden@Roguelike@CoppersRecastResult@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@CoppersRecastResult@(JieGarden@Roguelike@CloseCollectionContinue)",
             "JieGarden@Roguelike@CoppersTakeFlag",
             "JieGarden@Roguelike@DropsFlag",
             "JieGarden@Roguelike@CloseEvent",
@@ -404,8 +401,8 @@
         "postDelay": 500,
         "cache": true,
         "next": [
-            "JieGarden@Roguelike@CloseCollectionClose",
-            "JieGarden@Roguelike@CloseCollectionContinue",
+            "JieGarden@Roguelike@CoppersTakeConfirm@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@CoppersTakeConfirm@(JieGarden@Roguelike@CloseCollectionContinue)",
             "JieGarden@Roguelike@CoppersExchangeFinish",
             "JieGarden@Roguelike@CoppersExchangeConfirm",
             "#self"
@@ -472,9 +469,7 @@
         ],
         "maskRange": [1, 255]
     },
-    "JieGarden@Roguelike@DeepExploration": {
-        "template": "Roguelike@DeepExploration.png"
-    },
+    "JieGarden@Roguelike@DeepExploration": {},
     "JieGarden@Roguelike@DeepExplorationEnd": {
         "template": "JieGarden@Roguelike@Confirm.png"
     },
@@ -541,13 +536,7 @@
     },
     "JieGarden@Roguelike@GamePass": {},
     "JieGarden@Roguelike@GamePassSkip1": {},
-    "JieGarden@Roguelike@GamePassSkip1Confirm": {
-        "next": [
-            "JieGarden@Roguelike@GamePassSkip2",
-            "JieGarden@Roguelike@GamePassTheEndConfirm",
-            "JieGarden@Roguelike@GamePass"
-        ]
-    },
+    "JieGarden@Roguelike@GamePassSkip1Confirm": {},
     "JieGarden@Roguelike@GamePassSkip2": {},
     "JieGarden@Roguelike@GamePassTheEndConfirm": {
         "roi": [580, 550, 120, 90]
@@ -561,8 +550,9 @@
     "JieGarden@Roguelike@GetDropRecruit": {},
     "JieGarden@Roguelike@GetDropSelect": {
         "next": [
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@GetDropSelect@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@GetDropSelect@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@CloseEvent",
             "JieGarden@Roguelike@GetDropSelectRecruit",
             "JieGarden@Roguelike@GetDropSelectReward",
             "JieGarden@Roguelike@GetDropSwitch",
@@ -583,8 +573,9 @@
     },
     "JieGarden@Roguelike@GetDrops": {
         "next": [
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@GetDrops@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@GetDrops@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@CloseEvent",
             "JieGarden@Roguelike@GetDrop1",
             "JieGarden@Roguelike@GetDrop2",
             "JieGarden@Roguelike@GetDropSelectReward",
@@ -678,6 +669,7 @@
         "roi": [550, 545, 184, 64],
         "next": [
             "JieGarden@Roguelike@RandomPickAfterNextLevel",
+            "JieGarden@Roguelike@NextLevel@(JieGarden@Roguelike@CloseCollectionContinue)",
             "JieGarden@Roguelike@CloseInterview",
             "JieGarden@Roguelike@StrategyChange",
             "JieGarden@Roguelike@NextLevel"
@@ -714,6 +706,7 @@
         "template": "JieGarden@Roguelike@RandomPick.png",
         "next": [
             "JieGarden@Roguelike@RandomPickAfterNextLevel@NextAfterLoadingText",
+            "JieGarden@Roguelike@RandomPickAfterNextLevel@(JieGarden@Roguelike@CloseCollectionContinue)",
             "JieGarden@Roguelike@CloseInterview",
             "JieGarden@Roguelike@StrategyChange",
             "#self"
@@ -1137,8 +1130,8 @@
     },
     "JieGarden@Roguelike@StageTraderEnter": {
         "next": [
-            "JieGarden@Roguelike@StageTraderEnter-CloseCollectionClose",
-            "JieGarden@Roguelike@StageTraderEnter-CloseCollectionContinue",
+            "JieGarden@Roguelike@StageTraderEnter@(JieGarden@Roguelike@CloseCollectionClose)",
+            "JieGarden@Roguelike@StageTraderEnter@(JieGarden@Roguelike@CloseCollectionContinue)",
             "JieGarden@Roguelike@StageVerticalConfirmTrader",
             "JieGarden@Roguelike@StageTraderEnter",
             "JieGarden@Roguelike@StageTraderInvestSystem",
@@ -1146,16 +1139,6 @@
             "JieGarden@Roguelike@StageTraderLeave",
             "JieGarden@Roguelike@StageTraderLeaveConfirm"
         ]
-    },
-    "JieGarden@Roguelike@StageTraderEnter-CloseCollectionClose": {
-        "template": "JieGarden@Roguelike@CloseCollectionClose.png",
-        "baseTask": "JieGarden@Roguelike@CloseCollectionClose",
-        "next": ["JieGarden@Roguelike@StageTraderEnter#next"]
-    },
-    "JieGarden@Roguelike@StageTraderEnter-CloseCollectionContinue": {
-        "template": "JieGarden@Roguelike@CloseCollectionContinue.png",
-        "baseTask": "JieGarden@Roguelike@CloseCollectionContinue",
-        "next": ["JieGarden@Roguelike@StageTraderEnter#next"]
     },
     "JieGarden@Roguelike@StageTraderInvest-Wallet": {
         "doc": "商店投资界面的右上角的单局余额",
@@ -1196,8 +1179,8 @@
         "next": [
             "JieGarden@Roguelike@NextLevel",
             "JieGarden@Roguelike@RandomPickAfterNextLevel",
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionClose)",
             "JieGarden@Roguelike@StageBoskyPassage",
             "JieGarden@Roguelike@StageGuidance",
             "JieGarden@Roguelike@StageEmergencyOps",
@@ -1220,8 +1203,8 @@
         "next": [
             "JieGarden@Roguelike@NextLevel",
             "JieGarden@Roguelike@RandomPickAfterNextLevel",
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionClose)",
             "JieGarden@Roguelike@Routing_BoskyPassage",
             "JieGarden@Roguelike@Stages_leaveBoskyPassage#next"
         ]
@@ -1232,8 +1215,8 @@
         "next": [
             "JieGarden@Roguelike@NextLevel",
             "JieGarden@Roguelike@RandomPickAfterNextLevel",
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionClose)",
             "JieGarden@Roguelike@StageBoskyPassage",
             "JieGarden@Roguelike@StageGuidance",
             "JieGarden@Roguelike@StageTrader",
@@ -1257,8 +1240,8 @@
         "next": [
             "JieGarden@Roguelike@NextLevel",
             "JieGarden@Roguelike@RandomPickAfterNextLevel",
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionClose)",
             "JieGarden@Roguelike@Routing-FastPass"
         ],
         "onErrorNext": ["JieGarden@Roguelike@ExitThenAbandon"]
@@ -1274,8 +1257,8 @@
         "next": [
             "JieGarden@Roguelike@NextLevel",
             "JieGarden@Roguelike@RandomPickAfterNextLevel",
-            "JieGarden@Roguelike@CloseCollectionContinue",
-            "JieGarden@Roguelike@CloseCollectionClose",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionContinue)",
+            "JieGarden@Roguelike@Stages@(JieGarden@Roguelike@CloseCollectionClose)",
             "JieGarden@Roguelike@StageBoskyPassage",
             "JieGarden@Roguelike@StageGuidance",
             "JieGarden@Roguelike@StageCombatOps",
@@ -1312,7 +1295,7 @@
             ["汝吾(门)?", "_default"],
             ["见字祠", "_default"],
             ["始末陵", "_default"],
-            ["是非境", "_boskyPassageDefault"]
+            ["是非(境|坍)", "_boskyPassageDefault"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1329,7 +1312,7 @@
             ["汝吾(门)?", "_pragmatic"],
             ["见字祠", "_default"],
             ["始末陵", "_default"],
-            ["是非境", "_boskyPassageDefault"]
+            ["是非(境|坍)", "_boskyPassageDefault"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1345,7 +1328,7 @@
             ["汝吾(门)?", "_restart"],
             ["见字祠", "_restart"],
             ["始末陵", "_restart"],
-            ["是非境", "_leaveBoskyPassage"]
+            ["是非(境|坍)", "_leaveBoskyPassage"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1362,7 +1345,7 @@
             ["汝吾(门)?", "_restart"],
             ["见字祠", "_restart"],
             ["始末陵", "_restart"],
-            ["是非境", "_leaveBoskyPassage"]
+            ["是非(境|坍)", "_leaveBoskyPassage"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1379,7 +1362,7 @@
             ["汝吾(门)?", "_restart"],
             ["见字祠", "_restart"],
             ["始末陵", "_restart"],
-            ["是非境", "_leaveBoskyPassage"]
+            ["是非(境|坍)", "_leaveBoskyPassage"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1395,7 +1378,7 @@
             ["汝吾(门)?", "_restart"],
             ["见字祠", "_restart"],
             ["始末陵", "_restart"],
-            ["是非境", "_boskyPassageDefault"]
+            ["是非(境|坍)", "_boskyPassageDefault"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1411,7 +1394,7 @@
             ["汝吾(门)?", "_exit"],
             ["见字祠", "_exit"],
             ["始末陵", "_exit"],
-            ["是非境", "_leaveBoskyPassage"]
+            ["是非(境|坍)", "_leaveBoskyPassage"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1428,7 +1411,7 @@
             ["汝吾(门)?", "_exit"],
             ["见字祠", "_exit"],
             ["始末陵", "_exit"],
-            ["是非境", "_leaveBoskyPassage"]
+            ["是非(境|坍)", "_leaveBoskyPassage"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1444,7 +1427,7 @@
             ["汝吾(门)?", "_default"],
             ["见字祠", "_default"],
             ["始末陵", "_default"],
-            ["是非境", "_boskyPassageDefault"]
+            ["是非(境|坍)", "_boskyPassageDefault"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1460,7 +1443,7 @@
             ["汝吾(门)?", "_default"],
             ["见字祠", "_default"],
             ["始末陵", "_default"],
-            ["是非境", "_boskyPassageDefault"]
+            ["是非(境|坍)", "_boskyPassageDefault"]
         ],
         "roi": [627, 14, 71, 28],
         "withoutDet": true,
@@ -1483,7 +1466,7 @@
         "action": "Swipe",
         "specificRect": [750, 200, 1, 1],
         "rectMove": [750, 500, 1, 1],
-        "specialParams": [150, 0, 2, 0],
+        "specialParams": [150, 0, 20, 0],
         "postDelay": 500
     },
     "JieGarden@RoguelikeEncounter-MoveDown": {
@@ -1492,7 +1475,7 @@
         "action": "Swipe",
         "specificRect": [750, 500, 1, 1],
         "rectMove": [750, 200, 1, 1],
-        "specialParams": [150, 0, 2, 0],
+        "specialParams": [150, 0, 20, 0],
         "postDelay": 500
     },
     "JieGarden@RoguelikeEncounter-MoveUp": {
@@ -1501,7 +1484,7 @@
         "action": "Swipe",
         "specificRect": [750, 200, 1, 1],
         "rectMove": [750, 500, 1, 1],
-        "specialParams": [150, 0, 2, 0],
+        "specialParams": [150, 0, 20, 0],
         "postDelay": 500
     },
     "JieGarden@RoguelikeEncounterOptionAnalyzer-Option": {
